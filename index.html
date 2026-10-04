@@ -1,73 +1,846 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>3D Keep-Ups</title>
-    <link rel="stylesheet" href="styles.css">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>TILT KICK — Head. Tilt. Kick.</title>
 
-    <!-- Load Mediapipe libraries FIRST -->
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <!-- Primary SEO Meta Tags -->
+    <meta name="title" content="TILT KICK — Head. Tilt. Kick.">
+    <meta name="description"
+        content="A webcam-controlled 3D football penalty-kick browser game. Tilt your head to aim, hold to charge, nod upward to kick, or stand and play with full-body motion.">
+    <meta name="theme-color" content="#090e16">
+
+    <!-- Fonts: Outfit & Inter for premium athletic broadcast styling -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700;800;900&display=swap"
+        rel="stylesheet">
+
+    <!-- MediaPipe Libraries for Pose & Face Tracking -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"
+        crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
 
-    <!-- Primary Meta Tags -->
-    <meta name="title" content="3D Keep-Ups: football fun at home">
-    <meta name="description" content="Free web game; no sign-up or downloads">
-
-    <!-- Open Graph / Facebook -->
-    <meta property="og:type" content="website">
-    <meta property="og:url" content="https://collidingscopes.github.io/keep-ups/">
-    <meta property="og:title" content="3D Keep-Ups: football fun at home">
-    <meta property="og:description" content="Free web game; no sign-up or downloads">
-    <meta property="og:image" content="https://raw.githubusercontent.com/collidingScopes/siteOG/main/keepups.png">
-
-    <!-- Twitter -->
-    <meta property="twitter:card" content="summary_large_image">
-    <meta property="twitter:url" content="https://collidingscopes.github.io/keep-ups/">
-    <meta property="twitter:title" content="3D Keep-Ups: football fun at home">
-    <meta property="twitter:description" content="Free web game; no sign-up or downloads">
-    <meta property="twitter:image" content="https://raw.githubusercontent.com/collidingScopes/siteOG/main/keepups.png">
-
-    <!-- <link rel="icon" href="assets/favicon.png">
-    <link rel="apple-touch-icon" href="assets/apple-touch-icon.png"> -->
-    <script defer src="https://cloud.umami.is/script.js" data-website-id="eb59c81c-27cb-4e1d-9e8c-bfbe70c48cd9"></script>
+    <link rel="stylesheet" href="styles.css">
 </head>
+
 <body>
-    <div class="container">
-        <p id="feedback-para">Feedback: <a href="https://x.com/measure_plan" target="_blank">X</a> / <a href="https://instagram.com/stereo.drift" target="_blank">IG</a></p>
-        <div id="background"></div>
-        <div class="webcam-container">
-            <video id="webcam" autoplay playsinline></video>
+    <!-- Fullscreen 3D Three.js Stadium Canvas Container -->
+    <div id="game-container"></div>
+
+    <!-- Top Right Action Buttons: Pause & Audio -->
+    <div class="top-nav-actions">
+        <button id="btn-pause" class="glass-icon-btn" aria-label="Pause Game" title="Pause Game (ESC)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <rect x="6" y="4" width="4" height="16" rx="1" />
+                <rect x="14" y="4" width="4" height="16" rx="1" />
+            </svg>
+        </button>
+        <button id="audio-toggle-btn" class="glass-icon-btn" aria-label="Toggle Sound" title="Toggle Sound">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M11 5L6 9H2v6h4l5 4V5z" />
+                <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07" />
+            </svg>
+        </button>
+    </div>
+
+    <!-- Picture-in-Picture Webcam Panel (AR corner mirror) -->
+    <div id="pip-webcam-container">
+        <div class="pip-header">
+            <span id="pip-status-badge" class="pip-badge searching">SEARCHING...</span>
+            <button id="pip-toggle-btn" class="pip-btn">CAM: ON</button>
+        </div>
+        <div class="pip-video-wrapper">
+            <video id="webcam" autoplay playsinline muted></video>
             <canvas id="overlayCanvas"></canvas>
-            <div id="tpose-indicator">T-Pose Detected...</div>
-        </div>
-        <div id="game-container">
-            <!-- Three.js canvas will be appended here -->
         </div>
     </div>
 
-    <!-- Info / Loading Message -->
-    <div id="loading-message">Loading libraries...</div>
-    <div id="score">Keep-ups: 0</div>
-    
-    <!-- New Instructions Button -->
-    <button id="instructions-button">?</button>
+    <!-- Tracking Debug Overlay (Toggle with ` backtick) -->
+    <div id="debug-overlay" class="debug-overlay" style="display: none;">
+        <div class="debug-title">TRACKING DEBUG (` to close)</div>
+        <div class="debug-row"><span>Status:</span><strong id="dbg-status">OK</strong></div>
+        <div class="debug-row"><span>Raw Roll:</span><strong id="dbg-raw">0.0°</strong></div>
+        <div class="debug-row"><span>Smoothed:</span><strong id="dbg-smoothed">0.0°</strong></div>
+        <div class="debug-row"><span>Neutral:</span><strong id="dbg-neutral">0.0°</strong></div>
+        <div class="debug-row"><span>Dead Zone:</span><strong id="dbg-deadzone">7.0°</strong></div>
+        <div class="debug-row"><span>Aim:</span><strong id="dbg-aim">0.00</strong></div>
+        <div class="debug-row"><span>Power:</span><strong id="dbg-power">0%</strong></div>
+    </div>
 
-    <!-- New Instructions Overlay -->
-    <div id="instructions-overlay">
-        <div id="instructions-content">
-            <h2>3D Keep-Ups ⚽</h2>
-            <ul>
-                <li>Keep the soccer ball in the air</li>
-                <li>Move your knees and feet</li>
-                <li>Stretch out your arms (T-pose) for 1 second to reset the ball</li>
-            </ul>
-            <p>Position yourself so your full body is visible to the camera</p>
-            <p class="instructions-note">Click anywhere to close</p>
+    <!-- ==================== UI SCREENS ==================== -->
+
+    <!-- 1. MAIN MENU SCREEN -->
+    <div id="screen-main-menu" class="ui-screen active">
+        <div class="menu-content">
+            <h1 class="game-logo">TILT KICK</h1>
+            <p class="game-tagline">HEAD. TILT. KICK.</p>
+
+            <div class="menu-actions">
+                <button id="btn-play" class="btn btn-primary">
+                    <span>PLAY MATCH</span>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="2.5">
+                        <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                    </svg>
+                </button>
+                <button id="btn-practice" class="btn btn-secondary">
+                    <span>PRACTICE MODE</span>
+                </button>
+                <button id="btn-how-to" class="btn btn-secondary">
+                    <span>HOW TO PLAY</span>
+                </button>
+                <button id="btn-settings" class="btn btn-outline">
+                    <span>SETTINGS</span>
+                </button>
+                <button id="btn-stats" class="btn btn-outline">
+                    <span>CAREER STATS</span>
+                </button>
+            </div>
+
+            <div class="menu-footer">
+                <div class="footer-item">
+                    <span class="dot-live"></span>
+                    <span>Camera video processed locally in your browser</span>
+                </div>
+                <div class="footer-divider">•</div>
+                <div class="footer-item">Desktop webcam recommended</div>
+                <div class="footer-divider">•</div>
+                <div class="footer-item">Keyboard fallback (← / → + Space + ↑)</div>
+            </div>
         </div>
     </div>
 
+    <!-- 2. TRACKING MODE SELECTION ("CHOOSE YOUR PLAY STYLE") -->
+    <div id="screen-tracking-mode" class="ui-screen" style="display: none;">
+        <div class="screen-header">
+            <h2 class="screen-title">CHOOSE YOUR PLAY STYLE</h2>
+            <p class="screen-subtitle">Select your preferred webcam motion tracking mode</p>
+        </div>
+
+        <div class="mode-cards-grid">
+            <!-- Head Mode Card -->
+            <div id="card-mode-head" class="mode-card primary-card">
+                <div class="mode-card-badge">RECOMMENDED</div>
+                <div class="mode-icon-wrapper">
+                    <!-- Face tracking icon -->
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="1.8">
+                        <circle cx="12" cy="12" r="7" stroke-dasharray="2 2" />
+                        <circle cx="12" cy="12" r="9" />
+                        <path d="M9 10h.01M15 10h.01" />
+                        <path d="M9.5 15a3.5 3.5 0 0 0 5 0" />
+                        <path d="M4 12h-2M22 12h-2" />
+                    </svg>
+                </div>
+                <div class="mode-text">
+                    <h3 class="mode-title">HEAD MODE</h3>
+                    <span class="mode-style-pill">SIT & PLAY</span>
+                    <p class="mode-desc">Tilt to aim horizontally, hold to build power, and nod upward to kick. Strictly
+                        face-only tracking.</p>
+                </div>
+                <div class="mode-best-for">
+                    <span class="best-for-label">BEST FOR:</span>
+                    <span class="best-for-tags">Sitting • Laptop • Webcam</span>
+                </div>
+                <button class="btn btn-card">SELECT HEAD MODE</button>
+            </div>
+
+            <!-- Body Mode Card -->
+            <div id="card-mode-body" class="mode-card">
+                <div class="mode-card-badge secondary">FULL MOTION</div>
+                <div class="mode-icon-wrapper">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="1.8">
+                        <circle cx="12" cy="4" r="2.5" />
+                        <path d="M12 7v6M9 9l3 2 3-2M9 17l3-4 3 4M8 21l2-4M16 21l-2-4" />
+                    </svg>
+                </div>
+                <div class="mode-text">
+                    <h3 class="mode-title">BODY MODE</h3>
+                    <span class="mode-style-pill body-pill">STAND & PLAY</span>
+                    <p class="mode-desc">Use torso lean to steer the ball and lift your foot or snap to fire the shot.
+                        Full body pose tracking.</p>
+                </div>
+                <div class="mode-best-for">
+                    <span class="best-for-label">BEST FOR:</span>
+                    <span class="best-for-tags">Standing • Full Body • Webcam</span>
+                </div>
+                <button class="btn btn-card">SELECT BODY MODE</button>
+            </div>
+        </div>
+
+        <button id="btn-back-tracking" class="btn btn-back">‹ BACK TO MENU</button>
+    </div>
+
+    <!-- 3. GAME MODE SELECTION -->
+    <div id="screen-game-mode" class="ui-screen" style="display: none;">
+        <div class="screen-header">
+            <h2 class="screen-title">SELECT GAME MODE</h2>
+            <p class="screen-subtitle">Play solo time trial or challenge a friend in pass & play</p>
+        </div>
+
+        <div class="game-cards-grid">
+            <!-- Solo Mode Card -->
+            <div id="card-game-solo" class="game-card">
+                <div class="game-card-icon">
+                    <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10" />
+                        <polyline points="12 6 12 12 16 14" />
+                    </svg>
+                </div>
+                <h3 class="game-card-title">SOLO MATCH</h3>
+                <span class="game-card-tag">TIMED PENALTY TRIAL</span>
+                <p class="game-card-desc">Beat your high score. Test your shooting accuracy and power against the
+                    goalkeeper before time expires.</p>
+                <button class="btn btn-card">SELECT SOLO</button>
+            </div>
+
+            <!-- 2-Player Pass-and-Play Card -->
+            <div id="card-game-2p" class="game-card">
+                <div class="game-card-icon">
+                    <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                        <circle cx="9" cy="7" r="4" />
+                        <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                        <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                    </svg>
+                </div>
+                <h3 class="game-card-title">2 PLAYER</h3>
+                <span class="game-card-tag">PASS & PLAY</span>
+                <p class="game-card-desc">Take turns with a friend. Each player gets an equal timer and independent
+                    camera calibration.</p>
+                <button class="btn btn-card">SELECT 2 PLAYER</button>
+            </div>
+        </div>
+
+        <button id="btn-back-game" class="btn btn-back">‹ BACK</button>
+    </div>
+
+    <!-- 3B. MATCH LENGTH SELECTION SCREEN -->
+    <div id="screen-match-length" class="ui-screen" style="display: none;">
+        <div class="screen-header">
+            <h2 class="screen-title">MATCH LENGTH</h2>
+            <p class="screen-subtitle" id="match-length-sub">Select duration for your penalty session</p>
+        </div>
+
+        <div class="match-length-container">
+            <div class="time-presets-grid">
+                <button class="btn btn-preset" data-sec="60">1 MIN</button>
+                <button class="btn btn-preset active" data-sec="180">3 MIN</button>
+                <button class="btn btn-preset" data-sec="300">5 MIN</button>
+                <button class="btn btn-preset" data-sec="600">10 MIN</button>
+            </div>
+
+            <div class="custom-time-box">
+                <div class="custom-time-header">
+                    <span>CUSTOM DURATION</span>
+                    <strong id="match-duration-val" class="tabular-num">3:00</strong>
+                </div>
+                <input type="range" id="custom-time-slider" min="30" max="600" step="15" value="180">
+            </div>
+
+            <div class="match-summary-pill" id="match-summary-pill">
+                SOLO MATCH — 3:00
+            </div>
+
+            <div class="match-length-actions">
+                <button id="btn-start-match" class="btn btn-primary" style="padding: 12px 36px; font-size: 1rem;">
+                    START MATCH
+                </button>
+                <button id="btn-back-match-length" class="btn btn-back" style="margin-top: 14px;">‹ BACK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 4. HOW TO PLAY SCREEN -->
+    <div id="screen-how-to-play" class="ui-screen" style="display: none;">
+        <div class="how-to-modal">
+            <div class="how-to-header">
+                <h2>HOW TO PLAY TILT KICK</h2>
+                <div class="how-to-tabs">
+                    <button id="tab-how-to-head" class="how-to-tab active">HEAD MODE</button>
+                    <button id="tab-how-to-body" class="how-to-tab">BODY MODE</button>
+                </div>
+            </div>
+
+            <!-- Head Mode Instructions -->
+            <div id="how-to-content-head" class="how-to-steps-grid">
+                <div class="step-card">
+                    <span class="step-num">STEP 01</span>
+                    <div class="step-icon">
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <path d="M12 2v20M5 12l7-7 7 7" />
+                        </svg>
+                    </div>
+                    <h4>TILT TO AIM</h4>
+                    <p>Tilt your head left or right to move the aim reticle across the goal mouth. Your head roll steers
+                        horizontal placement.</p>
+                </div>
+                <div class="step-card">
+                    <span class="step-num">STEP 02</span>
+                    <div class="step-icon">
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+                        </svg>
+                    </div>
+                    <h4>HOLD TO CHARGE</h4>
+                    <p>Remain tilted to charge shot power from 0% to 100%. Aim stays perfectly stable while charging.
+                    </p>
+                </div>
+                <div class="step-card">
+                    <span class="step-num">STEP 03</span>
+                    <div class="step-icon">
+                        <!-- Upward arrow / nod icon -->
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#00e676" stroke-width="2.5">
+                            <line x1="12" y1="19" x2="12" y2="5" />
+                            <polyline points="5 12 12 5 19 12" />
+                        </svg>
+                    </div>
+                    <h4>NOD UP TO KICK</h4>
+                    <p>Execute a quick UPWARD nod with your head to fire the penalty! You never need to return your head
+                        to neutral center.</p>
+                </div>
+            </div>
+
+            <!-- Body Mode Instructions -->
+            <div id="how-to-content-body" class="how-to-steps-grid" style="display: none;">
+                <div class="step-card">
+                    <span class="step-num">STEP 01</span>
+                    <div class="step-icon">
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <circle cx="12" cy="5" r="3" />
+                            <path d="M12 8v8M8 12h8" />
+                        </svg>
+                    </div>
+                    <h4>STAND IN FRAME</h4>
+                    <p>Step back so your upper body and legs are clearly visible to the webcam.</p>
+                </div>
+                <div class="step-card">
+                    <span class="step-num">STEP 02</span>
+                    <div class="step-icon">
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <path d="m18 15-6-6-6 6" />
+                        </svg>
+                    </div>
+                    <h4>LEAN TO AIM</h4>
+                    <p>Lean your torso left or right to direct the shot into the corners. Hold stance to build power.
+                    </p>
+                </div>
+                <div class="step-card">
+                    <span class="step-num">STEP 03</span>
+                    <div class="step-icon">
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" />
+                        </svg>
+                    </div>
+                    <h4>KICK OR SNAP</h4>
+                    <p>Lift your kicking foot or snap back to neutral center to release the shot!</p>
+                </div>
+            </div>
+
+            <!-- Keyboard Fallback Note -->
+            <div class="keyboard-guide-box">
+                <span class="kb-badge">ACCESSIBILITY / KEYBOARD CONTROLS</span>
+                <p>No webcam? Use <strong>← / →</strong> or <strong>A / D</strong> to aim, hold
+                    <strong>SPACEBAR</strong> to charge power, press <strong>↑</strong> (or release Space) to kick,
+                    <strong>R</strong> to reset, and <strong>ESC</strong> for pause.</p>
+            </div>
+
+            <button id="btn-close-how-to" class="btn btn-primary" style="margin-top: 24px;">GOT IT — LET'S PLAY</button>
+        </div>
+    </div>
+
+    <!-- 5. MAIN GAMEPLAY HUD OVERLAY -->
+    <div id="gameplay-hud" class="ui-screen" style="display: none; pointer-events: none;">
+        <!-- Top Left Wordmark -->
+        <div class="hud-top-left">
+            <div class="hud-brand">
+                <span class="hud-brand-title">TILT KICK</span>
+                <span class="hud-brand-sub">HEAD. TILT. KICK.</span>
+            </div>
+        </div>
+
+        <!-- Center Top Status Pill -->
+        <div class="hud-center-top">
+            <div id="hud-status-pill" class="status-pill">TILT TO AIM</div>
+        </div>
+
+        <!-- Practice Mode Toolbar -->
+        <div id="practice-toolbar" class="practice-toolbar" style="display: none; pointer-events: auto;">
+            <span class="practice-tag">PRACTICE</span>
+            <button id="btn-practice-keeper" class="btn-tool">KEEPER: ON</button>
+            <button id="btn-practice-diff" class="btn-tool">DIFF: MED</button>
+            <button id="btn-practice-reset" class="btn-tool">RESET BALL (R)</button>
+            <button id="btn-practice-exit" class="btn-tool exit">EXIT</button>
+        </div>
+
+        <!-- Top Right Scoreboard (Tabular Numerals) -->
+        <div class="hud-top-right">
+            <!-- Solo Mode Stats -->
+            <div id="solo-stats" class="hud-scoreboard-card">
+                <div class="hud-stat-col">
+                    <span class="hud-stat-label">SCORE</span>
+                    <span id="score-val" class="hud-stat-val primary-val tabular-num">0</span>
+                </div>
+                <div class="hud-stat-col">
+                    <span class="hud-stat-label">TIME</span>
+                    <span id="timer-val" class="hud-stat-val tabular-num">03:00</span>
+                </div>
+                <div class="hud-stat-col">
+                    <span class="hud-stat-label">BEST</span>
+                    <span id="best-score-val" class="hud-stat-val gold-val tabular-num">0</span>
+                </div>
+            </div>
+
+            <!-- 2-Player Scoreboard -->
+            <div id="two-player-stats" class="hud-scoreboard-card" style="display: none;">
+                <div id="p1-hud-card" class="hud-stat-col player-col active-turn">
+                    <span class="hud-stat-label">PLAYER 1</span>
+                    <span id="p1-score-val" class="hud-stat-val tabular-num">0</span>
+                </div>
+                <div class="hud-vs-divider">VS</div>
+                <div id="p2-hud-card" class="hud-stat-col player-col">
+                    <span class="hud-stat-label">PLAYER 2</span>
+                    <span id="p2-score-val" class="hud-stat-val tabular-num">0</span>
+                </div>
+                <div class="hud-stat-col">
+                    <span class="hud-stat-label">TIME</span>
+                    <span id="p-timer-val" class="hud-stat-val tabular-num">03:00</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Goal Target Aim Reticle -->
+        <div id="aim-reticle" class="aim-reticle">
+            <div class="reticle-ring"></div>
+            <div class="reticle-crosshair-h"></div>
+            <div class="reticle-crosshair-v"></div>
+            <div class="reticle-dot"></div>
+            <span id="reticle-label" class="reticle-label">AIM</span>
+        </div>
+
+        <!-- Shot Quality Release Badge -->
+        <div id="shot-quality-badge" class="shot-quality-badge" style="display: none;">
+            <span id="shot-quality-text">PERFECT FINISH!</span>
+        </div>
+
+        <!-- Bottom Targeting & Power HUD -->
+        <div class="hud-bottom-controls">
+            <!-- Horizontal Targeting Guide -->
+            <div class="aim-guide-track">
+                <span class="aim-guide-text left">◂ LEFT</span>
+                <div class="aim-guide-bar">
+                    <div id="aim-guide-dot" class="aim-guide-dot"></div>
+                </div>
+                <span class="aim-guide-text right">RIGHT ▸</span>
+            </div>
+
+            <!-- Power Meter -->
+            <div class="power-meter-wrapper">
+                <div class="power-meter-header">
+                    <span class="power-label">SHOT POWER (HOLD TILT)</span>
+                    <span id="power-meter-pct" class="power-pct tabular-num">0%</span>
+                </div>
+                <div class="power-meter-track">
+                    <div id="power-meter-fill" class="power-meter-fill"></div>
+                </div>
+                <div class="power-meter-hint">NOD ↑ TO KICK</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 6. GUIDED CAMERA SETUP & CALIBRATION OVERLAY -->
+    <div id="calibration-overlay" class="modal-overlay" style="display: none;">
+        <div class="calibration-box guided-box">
+            <div class="setup-header">
+                <h3 id="cal-title" class="cal-title">SET UP YOUR CAMERA</h3>
+                <p id="cal-desc" class="cal-desc">Position your face inside the guide.</p>
+            </div>
+
+            <!-- Polished Live Camera Preview Area -->
+            <div class="cal-preview-wrapper">
+                <video id="cal-webcam-preview" autoplay playsinline muted></video>
+                <div class="cal-preview-overlay"></div>
+
+                <!-- Face Framing Guide for Head Mode -->
+                <div id="face-guide-frame" class="face-guide-frame">
+                    <div class="guide-corner tl"></div>
+                    <div class="guide-corner tr"></div>
+                    <div class="guide-corner bl"></div>
+                    <div class="guide-corner br"></div>
+                    <div class="guide-oval-boundary"></div>
+                    <div class="guide-center-reticle">
+                        <div class="reticle-plus-h"></div>
+                        <div class="reticle-plus-v"></div>
+                        <div class="reticle-plus-dot"></div>
+                    </div>
+                    <span class="guide-tag">CENTER YOUR FACE</span>
+                </div>
+
+                <!-- Full-Body Framing Guide for Body Mode -->
+                <div id="body-guide-frame" class="body-guide-frame" style="display: none;">
+                    <div class="guide-corner tl"></div>
+                    <div class="guide-corner tr"></div>
+                    <div class="guide-corner bl"></div>
+                    <div class="guide-corner br"></div>
+                    <svg class="body-silhouette-svg" viewBox="0 0 160 260" fill="none" stroke="currentColor">
+                        <circle cx="80" cy="35" r="22" stroke-width="2.5" />
+                        <path d="M80 58 v85" stroke-width="2.5" />
+                        <path d="M42 90 l38 -20 l38 20" stroke-width="2.5" stroke-linecap="round" />
+                        <path d="M80 143 l-30 95 M80 143 l30 95" stroke-width="2.5" stroke-linecap="round" />
+                    </svg>
+                    <span class="guide-tag">CENTER YOUR BODY</span>
+                </div>
+
+                <!-- Camera Access Needed / Unavailable Fallback UI -->
+                <div id="cal-camera-fallback" class="cal-camera-fallback" style="display: none;">
+                    <div class="fallback-icon">📷</div>
+                    <h4 id="cal-fallback-title">CAMERA ACCESS NEEDED</h4>
+                    <p id="cal-fallback-desc">We need camera access to track your head movement.</p>
+                    <div class="fallback-buttons">
+                        <button id="btn-cal-retry" class="btn btn-primary btn-sm">TRY AGAIN</button>
+                        <button id="btn-cal-fallback-key" class="btn btn-outline btn-sm">USE KEYBOARD</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Dynamic Live Tracking Status Pill -->
+            <div id="cal-status-badge" class="cal-status-badge">
+                <span id="cal-status-icon">○</span>
+                <span id="cal-status-text">FACE NOT DETECTED</span>
+            </div>
+
+            <!-- Live Calibration Progress & Quality Indicator -->
+            <div id="cal-countdown-box" class="cal-countdown-box">
+                <div class="cal-subtext-row">
+                    <span id="cal-subtext">LOOK STRAIGHT — Keep your head still</span>
+                    <span id="cal-step-count" class="cal-step-count"></span>
+                </div>
+                <div class="cal-progress-bar">
+                    <div id="cal-progress-fill" class="cal-progress-fill"></div>
+                </div>
+                <div class="cal-quality-row">
+                    <span class="quality-label">Calibration Quality:</span>
+                    <div id="cal-quality-dots" class="cal-quality-dots">
+                        <span class="qdot"></span>
+                        <span class="qdot"></span>
+                        <span class="qdot"></span>
+                        <span class="qdot"></span>
+                        <span class="qdot"></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Calibration Complete Success State -->
+            <div id="cal-success-card" class="cal-success-card" style="display: none;">
+                <div class="success-icon-wrap">
+                    <span class="success-check">✓</span>
+                </div>
+                <div class="success-text-wrap">
+                    <h4 class="cal-success-title">CALIBRATION COMPLETE</h4>
+                    <p class="cal-success-desc">Your neutral position is saved.</p>
+                </div>
+            </div>
+
+            <!-- Calibration Actions -->
+            <div class="cal-actions">
+                <button id="btn-cal-start-match" class="btn btn-primary btn-cal-action" style="display: none;">
+                    YES, START MATCH
+                </button>
+                <button id="btn-cal-recalibrate" class="btn btn-outline btn-cal-action" style="display: none;">
+                    ↻ RECALIBRATE
+                </button>
+                <button id="btn-cal-ready" class="btn btn-primary btn-cal-action" style="display: none;">
+                    READY (SPACE)
+                </button>
+                <button id="btn-cal-back" class="btn btn-outline btn-cal-action">‹ BACK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 7. CINEMATIC COUNTDOWN OVERLAY -->
+    <div id="countdown-overlay" class="modal-overlay countdown-layer" style="display: none;">
+        <div id="countdown-text" class="countdown-text">3</div>
+    </div>
+
+    <!-- 8. SHOT RESULT BANNER -->
+    <div id="result-banner" class="result-banner" style="display: none;">
+        <div class="result-card">
+            <h2 id="result-title" class="result-title">GOAL!</h2>
+            <div id="result-points" class="result-points">+150 PTS</div>
+            <p id="result-sub" class="result-sub">PERFECT FINISH — UPPER V</p>
+        </div>
+    </div>
+
+    <!-- 9. TWO PLAYER SWITCH MODAL -->
+    <div id="player-switch-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-box">
+            <div class="modal-icon">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#ffd700" stroke-width="2">
+                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                    <circle cx="9" cy="7" r="4" />
+                    <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                    <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                </svg>
+            </div>
+            <h2 id="switch-title" class="modal-title">PASS THE PHONE</h2>
+            <p id="switch-score-summary" class="modal-subtitle">PLAYER 1 FINISHED</p>
+            <p class="modal-desc">Hand the device to Player 2. Player 2 gets an independent, fresh camera calibration
+                and equal match time.</p>
+            <button id="btn-switch-ready" class="btn btn-primary" style="margin-top: 20px;">PLAYER 2 READY</button>
+        </div>
+    </div>
+
+    <!-- 10. PAUSE MODAL -->
+    <div id="modal-pause" class="modal-overlay" style="display: none;">
+        <div class="modal-box pause-box">
+            <h2 class="modal-title">GAME PAUSED</h2>
+            <p class="modal-desc" style="margin-bottom: 24px;">Take a breather or adjust your settings.</p>
+            <div class="pause-actions">
+                <button id="btn-pause-resume" class="btn btn-primary">RESUME GAME</button>
+                <button id="btn-pause-settings" class="btn btn-secondary">SETTINGS</button>
+                <button id="btn-pause-recalibrate" class="btn btn-secondary">RECALIBRATE CAMERA</button>
+                <button id="btn-pause-restart" class="btn btn-outline">RESTART MATCH</button>
+                <button id="btn-pause-menu" class="btn btn-outline">MAIN MENU</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 11. CONFIRMATION MODAL -->
+    <div id="modal-confirm" class="modal-overlay" style="display: none;">
+        <div class="modal-box confirm-box">
+            <div class="modal-icon alert-icon">
+                <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#ffd700" stroke-width="2">
+                    <circle cx="12" cy="12" r="10" />
+                    <line x1="12" y1="8" x2="12" y2="12" />
+                    <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+            </div>
+            <h3 id="confirm-title" class="modal-title">LEAVE MATCH?</h3>
+            <p id="confirm-desc" class="modal-desc">Current match progress and score will be lost.</p>
+            <div class="modal-actions" style="margin-top: 20px;">
+                <button id="btn-confirm-yes" class="btn btn-primary"
+                    style="background: #ff3b30; border-color: #ff3b30;">LEAVE</button>
+                <button id="btn-confirm-no" class="btn btn-outline">CANCEL</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 12. GAME OVER SCREEN -->
+    <div id="game-over-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-box game-over-box">
+            <div class="modal-icon trophy-icon">
+                <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="#ffd700" stroke-width="2">
+                    <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6" />
+                    <path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18" />
+                    <path d="M4 22h16" />
+                    <path
+                        d="M10 14.66V17c0 .55-.45 1-1 1H8c-.55 0-1 .45-1 1v1c0 .55.45 1 1 1h8c.55 0 1-.45 1-1v-1c0-.55-.45-1-1-1h-1c-.55 0-1-.45-1-1v-2.34" />
+                    <path d="M18 2H6v7a6 6 0 0 0 12 0V2Z" />
+                </svg>
+            </div>
+            <h2 id="game-over-title" class="modal-title">FULL TIME</h2>
+            <p id="game-over-subtitle" class="modal-subtitle" style="display: none;"></p>
+
+            <div id="game-over-details" class="game-over-stats"></div>
+
+            <div class="modal-actions game-over-actions">
+                <button id="btn-game-over-again" class="btn btn-primary">PLAY AGAIN</button>
+                <button id="btn-game-over-share" class="btn btn-secondary">SHARE RESULT</button>
+                <button id="btn-game-over-menu" class="btn btn-outline">MAIN MENU</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 13. CAREER STATS MODAL -->
+    <div id="modal-stats" class="modal-overlay" style="display: none;">
+        <div class="modal-box stats-box">
+            <div class="settings-header">
+                <h2>CAREER STATS</h2>
+                <button id="btn-close-stats" class="btn-close" aria-label="Close Stats">✕</button>
+            </div>
+            <div id="stats-grid" class="stats-grid">
+                <!-- Dynamically populated via UIManager -->
+            </div>
+            <div class="modal-actions" style="margin-top: 24px;">
+                <button id="btn-reset-stats" class="btn btn-outline" style="font-size: 0.85rem;">RESET STATS</button>
+                <button id="btn-done-stats" class="btn btn-primary">DONE</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 14. ADVANCED SETTINGS MODAL -->
+    <div id="screen-settings" class="modal-overlay" style="display: none;">
+        <div class="modal-box settings-box">
+            <div class="settings-header">
+                <h2>SETTINGS</h2>
+                <button id="btn-close-settings" class="btn-close" aria-label="Close Settings">✕</button>
+            </div>
+
+            <div class="settings-scroll-container">
+                <!-- CONTROLS SECTION -->
+                <div class="settings-section-title">CONTROLS</div>
+
+                <div class="setting-item slider-item">
+                    <div class="setting-info">
+                        <span class="setting-title">Head Sensitivity</span>
+                        <span class="setting-desc">Adjust how responsive the aim reticle is to head tilt</span>
+                    </div>
+                    <div class="slider-control">
+                        <input type="range" id="setting-sensitivity" min="0.5" max="2.0" step="0.1" value="1.0">
+                        <span id="setting-sensitivity-val" class="slider-val tabular-num">1.0x</span>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-info">
+                        <span class="setting-title">Aim Smoothing</span>
+                        <span class="setting-desc">Filter natural camera noise and micro-jitter</span>
+                    </div>
+                    <div class="segmented-control" id="seg-smoothing">
+                        <button class="seg-btn" data-val="low">LOW</button>
+                        <button class="seg-btn active" data-val="medium">MED</button>
+                        <button class="seg-btn" data-val="high">HIGH</button>
+                    </div>
+                </div>
+
+                <div class="setting-item slider-item">
+                    <div class="setting-info">
+                        <span class="setting-title">Center Dead Zone</span>
+                        <span class="setting-desc">Degrees around neutral where aim remains steady</span>
+                    </div>
+                    <div class="slider-control">
+                        <input type="range" id="setting-deadzone" min="4.0" max="12.0" step="0.5" value="7.0">
+                        <span id="setting-deadzone-val" class="slider-val tabular-num">7.0°</span>
+                    </div>
+                </div>
+
+                <div class="setting-item slider-item">
+                    <div class="setting-info">
+                        <span class="setting-title">Shot Power Multiplier</span>
+                        <span class="setting-desc">Scales overall shot velocity and flight trajectory</span>
+                    </div>
+                    <div class="slider-control">
+                        <input type="range" id="setting-shotpower" min="0.5" max="1.25" step="0.05" value="1.0">
+                        <span id="setting-shotpower-val" class="slider-val tabular-num">100%</span>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-info">
+                        <span class="setting-title">Charge Speed</span>
+                        <span class="setting-desc">How fast power builds while holding tilt</span>
+                    </div>
+                    <div class="segmented-control" id="seg-chargespeed">
+                        <button class="seg-btn" data-val="slow">SLOW</button>
+                        <button class="seg-btn active" data-val="normal">NORM</button>
+                        <button class="seg-btn" data-val="fast">FAST</button>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-info">
+                        <span class="setting-title">Aim Assist</span>
+                        <span class="setting-desc">Subtly stabilizes aim toward top corners</span>
+                    </div>
+                    <div class="segmented-control" id="seg-aimassist">
+                        <button class="seg-btn" data-val="off">OFF</button>
+                        <button class="seg-btn" data-val="low">LOW</button>
+                        <button class="seg-btn active" data-val="medium">MED</button>
+                    </div>
+                </div>
+
+                <!-- GAMEPLAY SECTION -->
+                <div class="settings-section-title">GAMEPLAY</div>
+
+                <div class="setting-item">
+                    <div class="setting-info">
+                        <span class="setting-title">Goalkeeper Difficulty</span>
+                        <span class="setting-desc">Adjust keeper reaction speed, reach, and positioning</span>
+                    </div>
+                    <div class="segmented-control" id="seg-difficulty">
+                        <button class="seg-btn" data-val="easy">EASY</button>
+                        <button class="seg-btn active" data-val="medium">MED</button>
+                        <button class="seg-btn" data-val="hard">HARD</button>
+                    </div>
+                </div>
+
+                <!-- AUDIO SECTION -->
+                <div class="settings-section-title">AUDIO</div>
+
+                <div class="setting-item slider-item">
+                    <div class="setting-info">
+                        <span class="setting-title">Master Volume</span>
+                        <span class="setting-desc">Main volume for match sounds and fanfares</span>
+                    </div>
+                    <div class="slider-control">
+                        <input type="range" id="setting-volume" min="0.0" max="1.0" step="0.05" value="0.8">
+                        <span id="setting-volume-val" class="slider-val tabular-num">80%</span>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-info">
+                        <span class="setting-title">Sound Effects</span>
+                        <span class="setting-desc">Whistles, kick thuds, crowd cheers, and goal fanfares</span>
+                    </div>
+                    <label class="switch">
+                        <input type="checkbox" id="setting-sound-toggle" checked>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+
+                <!-- CAMERA SECTION -->
+                <div class="settings-section-title">CAMERA</div>
+
+                <div class="setting-item">
+                    <div class="setting-info">
+                        <span class="setting-title">Webcam Preview (PiP)</span>
+                        <span class="setting-desc">Display corner camera feed and AR skeleton</span>
+                    </div>
+                    <label class="switch">
+                        <input type="checkbox" id="setting-cam-toggle" checked>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-info">
+                        <span class="setting-title">Head Recalibration</span>
+                        <span class="setting-desc">Reset your neutral head position baseline</span>
+                    </div>
+                    <button id="btn-setting-recalibrate" class="btn btn-secondary"
+                        style="padding: 8px 16px; font-size: 0.85rem;">
+                        RECALIBRATE
+                    </button>
+                </div>
+            </div>
+
+            <div class="settings-footer-actions">
+                <button id="btn-reset-defaults" class="btn btn-outline" style="font-size: 0.82rem; padding: 10px 18px;">
+                    RESET TO DEFAULTS
+                </button>
+                <button id="btn-save-settings-close" class="btn btn-primary"
+                    style="font-size: 0.82rem; padding: 10px 24px;">
+                    DONE
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Application Bootstrap -->
+    <script type="module" src="src/main.js"></script>
 </body>
-<script src="game.js" type="module"></script>
+
 </html>
