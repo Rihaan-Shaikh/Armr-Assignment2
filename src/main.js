@@ -54,8 +54,8 @@ class TiltKickApp {
         // 6. Connect UI & Event Callbacks
         this.setupCallbacks();
 
-        // 7. Request Camera Access
-        this.initCamera();
+        // 7. Bind Camera DOM elements (Camera stays OFF until calibration/gameplay)
+        this.inputManager.bindDOMElements(this.videoElement, this.overlayCanvas);
 
         // 8. Start Render & Game Loop
         this.lastTime = performance.now();
@@ -63,22 +63,6 @@ class TiltKickApp {
         requestAnimationFrame(this.loop);
 
         console.log('[TILT KICK] Ready to play.');
-    }
-
-    async initCamera() {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            console.warn('[TILT KICK] WebRTC not supported on this browser. Falling back to Keyboard.');
-            this.uiManager.updateTrackingBadge('KEYBOARD ONLY', false);
-            return;
-        }
-
-        const success = await this.inputManager.initCamera(this.videoElement, this.overlayCanvas);
-        if (success) {
-            console.log('[TILT KICK] Camera and tracking initialized.');
-        } else {
-            console.log('[TILT KICK] Camera permission denied or not found. Keyboard controls active.');
-            this.uiManager.updateTrackingBadge('KEYBOARD FALLBACK', false);
-        }
     }
 
     setupCallbacks() {
@@ -127,6 +111,7 @@ class TiltKickApp {
         };
 
         this.uiManager.onCalBackClicked = () => {
+            this.inputManager.stopCamera();
             this.gameManager.state = 'MAIN_MENU';
             this.ball.reset();
             this.goalkeeper.reset();
@@ -134,7 +119,7 @@ class TiltKickApp {
         };
 
         this.uiManager.onCalRetryCameraClicked = async () => {
-            const ok = await this.inputManager.retryCamera();
+            const ok = await this.inputManager.restartCamera();
             if (ok) {
                 this.uiManager.hideCameraError();
                 this.gameManager.recalibrate();
@@ -155,6 +140,7 @@ class TiltKickApp {
         };
 
         this.uiManager.onMainMenuClicked = () => {
+            this.inputManager.stopCamera();
             this.gameManager.state = 'MAIN_MENU';
             this.ball.reset();
             this.goalkeeper.reset();
@@ -197,9 +183,10 @@ class TiltKickApp {
         this.gameManager.update(delta);
 
         // 2. Update PiP tracking badge status & Guided Calibration feedback
+        const isCameraOn = this.inputManager.isCameraActive();
         const isTracking = this.inputManager.isTracking();
         const statusText = this.inputManager.getStatusText();
-        this.uiManager.updateTrackingBadge(statusText, isTracking);
+        this.uiManager.updateTrackingBadge(statusText, isTracking, isCameraOn);
 
         if (this.gameManager.state === 'CALIBRATION') {
             const posStatus = this.inputManager.getPositionStatus();

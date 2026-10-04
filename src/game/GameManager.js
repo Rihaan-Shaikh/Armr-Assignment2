@@ -63,6 +63,7 @@ export class GameManager {
         // Sequence Timers
         this.countdownValue = 3;
         this.countdownTimer = 0;
+        this.pauseSafetyTimer = null;
     }
 
     setGameMode(mode) {
@@ -120,11 +121,18 @@ export class GameManager {
         this.beginCalibration();
     }
 
-    beginCalibration() {
+    async beginCalibration() {
         this.state = 'CALIBRATION';
         this.inputManager.lockInput(false);
         this.uiManager.showCalibrationScreen(this.currentPlayer, this.trackingMode, this.inputManager);
-        this.inputManager.startCalibration();
+
+        const camOk = await this.inputManager.startCamera();
+        if (camOk) {
+            this.uiManager.hideCameraError();
+            this.inputManager.startCalibration();
+        } else {
+            this.uiManager.showCameraError(this.inputManager.cameraError);
+        }
     }
 
     onCalibrationComplete() {
@@ -300,9 +308,11 @@ export class GameManager {
                     this.currentPlayer = 2;
                     this.timeRemaining = this.matchLengthSec;
                     this.state = 'PLAYER_SWITCH';
+                    this.inputManager.pauseProcessing(true);
                     this.uiManager.showPlayerSwitchModal(2, this.player1Score, () => {
                         this.inputManager.resetPlayerSession();
-                        this.beginCalibration(); // Completely fresh calibration for Player 2
+                        this.inputManager.pauseProcessing(false);
+                        this.beginCalibration(); // Fresh calibration for Player 2 reusing single active stream
                     });
                 } else {
                     // Player 2 full time: Game over
@@ -328,16 +338,40 @@ export class GameManager {
         this.prePauseState = this.state;
         this.state = 'PAUSED';
         this.inputManager.lockInput(true);
+        this.inputManager.pauseProcessing(true);
         this.uiManager.showPauseModal();
+
+        // Safety timeout: If user leaves match paused for > 60s, stop camera hardware stream
+        if (this.pauseSafetyTimer) clearTimeout(this.pauseSafetyTimer);
+        this.pauseSafetyTimer = setTimeout(() => {
+            if (this.state === 'PAUSED') {
+                console.log('[GameManager] Pause inactive for 60s. Auto-stopping camera for privacy.');
+                this.inputManager.stopCamera();
+            }
+        }, 60000);
     }
 
-    resumeGame() {
+    async resumeGame() {
+        if (this.pauseSafetyTimer) {
+            clearTimeout(this.pauseSafetyTimer);
+            this.pauseSafetyTimer = null;
+        }
         this.uiManager.hidePauseModal();
         this.state = this.prePauseState === 'PAUSED' ? 'AIMING' : this.prePauseState;
+
+        // If camera was stopped during prolonged pause, re-acquire seamlessly
+        if (!this.inputManager.isCameraActive() && this.inputManager.cameraAllowed) {
+            await this.inputManager.startCamera();
+        }
+        this.inputManager.pauseProcessing(false);
         this.inputManager.lockInput(false);
     }
 
     recalibrate() {
+        if (this.pauseSafetyTimer) {
+            clearTimeout(this.pauseSafetyTimer);
+            this.pauseSafetyTimer = null;
+        }
         this.uiManager.hidePauseModal();
         this.inputManager.resetCalibration();
         this.beginCalibration();
@@ -357,8 +391,13 @@ export class GameManager {
     }
 
     endGame() {
+        if (this.pauseSafetyTimer) {
+            clearTimeout(this.pauseSafetyTimer);
+            this.pauseSafetyTimer = null;
+        }
         this.state = 'GAME_OVER';
         this.inputManager.lockInput(true);
+        this.inputManager.stopCamera(); // CAMERA = OFF immediately upon match end / Full Time
         soundEngine.playWhistle();
 
         if (this.gameMode === 'solo') {

@@ -1221,6 +1221,9 @@ export class UIManager {
         const modal = this.dom.gameOverModal;
         if (!modal) return;
 
+        if (this.dom.pipContainer) this.dom.pipContainer.style.display = 'none';
+        if (this.dom.btnPause) this.dom.btnPause.style.display = 'none';
+
         this.lastMatchShareData = { mode: 'solo', ...stats };
 
         const title = document.getElementById('game-over-title');
@@ -1250,6 +1253,9 @@ export class UIManager {
     showTwoPlayerGameOver(data) {
         const modal = this.dom.gameOverModal;
         if (!modal) return;
+
+        if (this.dom.pipContainer) this.dom.pipContainer.style.display = 'none';
+        if (this.dom.btnPause) this.dom.btnPause.style.display = 'none';
 
         this.lastMatchShareData = { mode: '2player', ...data };
 
@@ -1325,13 +1331,18 @@ export class UIManager {
         }
     }
 
-    updateTrackingBadge(statusText, isTracking) {
+    updateTrackingBadge(statusText, isTracking, isCameraActive = false) {
         if (!this.dom.pipStatusBadge) return;
         this.dom.pipStatusBadge.innerText = statusText;
-        if (isTracking) {
+        if (!isCameraActive) {
+            this.dom.pipStatusBadge.className = 'pip-badge off';
+            if (this.dom.pipToggleBtn) this.dom.pipToggleBtn.innerText = 'CAM: OFF';
+        } else if (isTracking) {
             this.dom.pipStatusBadge.className = 'pip-badge tracking';
+            if (this.dom.pipToggleBtn) this.dom.pipToggleBtn.innerText = 'CAM: ON';
         } else {
             this.dom.pipStatusBadge.className = 'pip-badge searching';
+            if (this.dom.pipToggleBtn) this.dom.pipToggleBtn.innerText = 'CAM: ON';
         }
     }
 
