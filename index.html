@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Keep-Ups</title>
+    <link rel="stylesheet" href="styles.css">
+
+    <!-- Load Mediapipe libraries FIRST -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+
+    <!-- Primary Meta Tags -->
+    <meta name="title" content="3D Keep-Ups: football fun at home">
+    <meta name="description" content="Free web game; no sign-up or downloads">
+
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://collidingscopes.github.io/keep-ups/">
+    <meta property="og:title" content="3D Keep-Ups: football fun at home">
+    <meta property="og:description" content="Free web game; no sign-up or downloads">
+    <meta property="og:image" content="https://raw.githubusercontent.com/collidingScopes/siteOG/main/keepups.png">
+
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image">
+    <meta property="twitter:url" content="https://collidingscopes.github.io/keep-ups/">
+    <meta property="twitter:title" content="3D Keep-Ups: football fun at home">
+    <meta property="twitter:description" content="Free web game; no sign-up or downloads">
+    <meta property="twitter:image" content="https://raw.githubusercontent.com/collidingScopes/siteOG/main/keepups.png">
+
+    <!-- <link rel="icon" href="assets/favicon.png">
+    <link rel="apple-touch-icon" href="assets/apple-touch-icon.png"> -->
+    <script defer src="https://cloud.umami.is/script.js" data-website-id="eb59c81c-27cb-4e1d-9e8c-bfbe70c48cd9"></script>
+</head>
+<body>
+    <div class="container">
+        <p id="feedback-para">Feedback: <a href="https://x.com/measure_plan" target="_blank">X</a> / <a href="https://instagram.com/stereo.drift" target="_blank">IG</a></p>
+        <div id="background"></div>
+        <div class="webcam-container">
+            <video id="webcam" autoplay playsinline></video>
+            <canvas id="overlayCanvas"></canvas>
+            <div id="tpose-indicator">T-Pose Detected...</div>
+        </div>
+        <div id="game-container">
+            <!-- Three.js canvas will be appended here -->
+        </div>
+    </div>
+
+    <!-- Info / Loading Message -->
+    <div id="loading-message">Loading libraries...</div>
+    <div id="score">Keep-ups: 0</div>
+    
+    <!-- New Instructions Button -->
+    <button id="instructions-button">?</button>
+
+    <!-- New Instructions Overlay -->
+    <div id="instructions-overlay">
+        <div id="instructions-content">
+            <h2>3D Keep-Ups ⚽</h2>
+            <ul>
+                <li>Keep the soccer ball in the air</li>
+                <li>Move your knees and feet</li>
+                <li>Stretch out your arms (T-pose) for 1 second to reset the ball</li>
+            </ul>
+            <p>Position yourself so your full body is visible to the camera</p>
+            <p class="instructions-note">Click anywhere to close</p>
+        </div>
+    </div>
+
+</body>
+<script src="game.js" type="module"></script>
+</html>
