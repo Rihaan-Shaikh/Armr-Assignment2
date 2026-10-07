@@ -1,6 +1,6 @@
 // Enhanced Shot Engine for TILT KICK
-// Implements continuous target mapping, 7 target zones, shot quality analysis,
-// and a FAIR, skill-rewarding Goalkeeper probability model based on difficulty settings.
+// Continuous 3D target coordinates, 7 distinct target zones,
+// shot quality grading, woodwork collision, and a skill-rewarding Goalkeeper probability model.
 
 import { settingsManager } from '../utils/SettingsManager.js';
 
@@ -17,22 +17,18 @@ export class ShotEngine {
 
     // Maps player's normalized aim (-1.0 to +1.0) and power (0.0 to 1.0) to continuous 3D world coordinates
     calculateTarget(aim, rawPower) {
-        // Apply shot power multiplier from settings (50% - 125%)
         const powerMultiplier = settingsManager.get('shotPower') || 1.0;
         const effectivePower = Math.min(1.0, rawPower * powerMultiplier);
 
-        // Horizontal target: -3.85m to +3.85m
-        // Aiming extreme left/right can graze post or fly wide
-        const targetX = aim * 3.68;
+        // Horizontal target range: -3.85m to +3.85m (posts are at ±3.66m)
+        const targetX = aim * 3.70;
 
-        // Vertical target:
-        // Driven ground shot at low power (~0.35m)
-        // Mid-height driven strike (~1.25m)
-        // Top shelf upper 90 roof (~2.15m - 2.35m)
-        const baseHeight = 0.32 + Math.pow(effectivePower, 0.95) * 1.95;
-
-        // Small natural human loft variation (±0.06m)
-        const targetY = Math.max(0.18, Math.min(2.52, baseHeight + (Math.random() - 0.5) * 0.08));
+        // Vertical target range:
+        // Low driven: ~0.35m
+        // Mid-height: ~1.25m
+        // Top shelf upper 90: ~2.18m - 2.38m
+        const baseHeight = 0.32 + Math.pow(effectivePower, 0.94) * 1.96;
+        const targetY = Math.max(0.20, Math.min(2.50, baseHeight + (Math.random() - 0.5) * 0.06));
 
         return { x: targetX, y: targetY, effectivePower };
     }
@@ -40,11 +36,10 @@ export class ShotEngine {
     // Classifies shot into one of 7 distinct target zones
     getTargetZone(x, y) {
         const absX = Math.abs(x);
-        const isLeft = x < -0.8;
-        const isRight = x > 0.8;
-        const isCenter = absX <= 0.8;
+        const isLeft = x < -0.85;
+        const isRight = x > 0.85;
 
-        if (y > 1.65) {
+        if (y > 1.68) {
             if (isLeft) return 'TOP_LEFT_90';
             if (isRight) return 'TOP_RIGHT_90';
             return 'TOP_CENTER';
@@ -62,13 +57,13 @@ export class ShotEngine {
     // Determine shot release quality: "PERFECT", "GREAT", "GOOD", "WEAK"
     getShotQuality(targetX, targetY, power) {
         const absX = Math.abs(targetX);
-        const isCorner = absX > 2.2 && (targetY > 1.55 || targetY < 0.9);
+        const isCorner = absX > 2.2 && (targetY > 1.55 || targetY < 0.90);
 
-        if (isCorner && power > 0.80) {
+        if (isCorner && power > 0.78) {
             return { label: 'PERFECT FINISH!', grade: 'PERFECT' };
-        } else if (absX > 1.6 && power > 0.65) {
+        } else if (absX > 1.6 && power > 0.62) {
             return { label: 'GREAT STRIKE!', grade: 'GREAT' };
-        } else if (power > 0.40) {
+        } else if (power > 0.38) {
             return { label: 'GOOD EFFORT', grade: 'GOOD' };
         } else {
             return { label: 'WEAK SHOT', grade: 'WEAK' };
@@ -137,46 +132,44 @@ export class ShotEngine {
         }
 
         // 3. FAIR Goalkeeper Save Model
-        // Reaction delay based on difficulty
         let reactionDelay = 0.15; // default medium
         let difficultySaveModifier = 0.0;
 
         if (difficulty === 'easy') {
-            reactionDelay = 0.24;      // Keeper reacts slower
-            difficultySaveModifier = -0.22; // Easier to score
+            reactionDelay = 0.24;
+            difficultySaveModifier = -0.22;
         } else if (difficulty === 'hard') {
-            reactionDelay = 0.09;      // Keeper reacts sharply
-            difficultySaveModifier = 0.12;  // Tougher keeper
+            reactionDelay = 0.09;
+            difficultySaveModifier = 0.12;
         }
 
         // Base save chance calculation:
-        // Placement factor: how far is the ball from center? (0 at center, 1 at corner)
+        // Placement bonus: how close to the corner?
         const distFromCenter = Math.hypot(absX, y - 1.22) / 3.8;
         const placementBonus = distFromCenter * 0.75; // Up to -75% save chance for corner shots
 
-        // Power factor: high power significantly reduces keeper's chance to reach
-        const powerBonus = effectivePower * 0.40; // Up to -40% save chance for high power
+        // Power bonus: high power significantly reduces keeper's chance to reach
+        const powerBonus = effectivePower * 0.40;
 
-        // Center penalty: shooting straight down the middle makes it much easier for keeper
         let baseSaveChance = 0.65;
         if (absX < 1.1) {
-            baseSaveChance = 0.78; // Down the middle
+            baseSaveChance = 0.78; // Down the middle is easiest for keeper
         } else if (zone === 'TOP_LEFT_90' || zone === 'TOP_RIGHT_90') {
-            baseSaveChance = 0.40; // Upper 90 corner
+            baseSaveChance = 0.38; // Upper 90 corner
         } else if (zone === 'BOTTOM_LEFT' || zone === 'BOTTOM_RIGHT') {
-            baseSaveChance = 0.45; // Low corners
+            baseSaveChance = 0.44; // Low corners
         }
 
-        // Final calculated save probability (strictly clamped)
         let saveProb = baseSaveChance - placementBonus - powerBonus + difficultySaveModifier;
-        saveProb = Math.max(0.08, Math.min(0.85, saveProb));
+        saveProb = Math.max(0.06, Math.min(0.85, saveProb));
 
-        // For exceptional Upper 90 shots with power > 80%, ensure 88%+ goal success
-        if ((zone === 'TOP_LEFT_90' || zone === 'TOP_RIGHT_90') && effectivePower > 0.78) {
-            saveProb = Math.min(0.12, saveProb);
+        // Upper 90 corner power shot guarantee (>78% power):
+        // Highly rewarding to skillful players (88%+ goal success)
+        if ((zone === 'TOP_LEFT_90' || zone === 'TOP_RIGHT_90') && effectivePower > 0.76) {
+            saveProb = Math.min(0.10, saveProb);
         }
 
-        // If keeper is turned off in Practice mode, save probability is 0
+        // If keeper is turned off in Practice mode
         const keeperEnabled = settingsManager.get('practiceKeeper') !== false;
         if (!keeperEnabled) {
             saveProb = 0;

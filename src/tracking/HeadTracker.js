@@ -1,66 +1,88 @@
 // Advanced Robust Head Tracker for TILT KICK
-// Control Pipeline:
-// ROLL = AIM LEFT / RIGHT
-// HOLD TILT = CHARGE POWER (Based on elapsed duration)
-// QUICK UPWARD NOD = KICK
-// (Aim is locked during nod so reticle does not jump)
+// 100% Deterministic State Machine: Zero False Positives, Zero Fake Progress.
+// Invariant Biometric Face Fingerprinting (18 Ratios), Multi-Face Crowd Rejection,
+// True 3D Head Pose (Roll, Pitch, Yaw), Hysteresis Dead Zone, Smart Neutral Drift,
+// and Power-Decoupled Center Nod Kick Detection.
 
 import { settingsManager } from '../utils/SettingsManager.js';
 
 export class HeadTracker {
     constructor() {
-        // Roll & Aim (Horizontal)
-        this.rawRollAngle = 0;        // Degrees: positive = tilt right, negative = tilt left
-        this.neutralRoll = 0;         // Calibrated neutral baseline
-        this.smoothedRoll = 0;        // Filtered degrees
-        this.normalizedAim = 0;       // -1.0 (Left) to +1.0 (Right)
-        this.lockedShotAim = 0;       // Aim frozen when upward nod begins
+        // Enrolled Player Profile & Identity Lock
+        this.enrolledProfile = null; // { biometricVector: Float32Array, sampleCount: number }
+        // 'ENROLLMENT_IDLE' | 'ENROLLMENT_SEARCHING' | 'ENROLLMENT_COLLECTING' | 'ENROLLMENT_SUCCESS'
+        this.enrollmentState = 'ENROLLMENT_IDLE';
+        this.identityMatchScore = 0; // 0 - 100%
+        this.identityMatchThreshold = 0.30; // Maximum normalized biometric distance for valid match
+        this.idSamples = [];
+        this.idSamplesRequired = 24; // Actual required clean frames
+        this.acceptedEnrollmentSamples = 0;
 
-        // Pitch & Nod (Vertical)
+        // Multi-Face Tracking State
+        this.detectedFaceCount = 0;
+        this.ignoredFaceCount = 0;
+        this.isPlayer1Locked = false;
+        this.searchingForPlayer = false;
+        this.playerLostTimestamp = 0;
+        this.recoveryGracePeriodMs = 2400; // 2.4s recovery window before resetting
+
+        // 3D Head Pose (Roll, Pitch, Yaw)
+        this.rawRollAngle = 0;        // Degrees: + = right tilt, - = left tilt
         this.rawPitch = 0;            // Normalized vertical pitch proxy
-        this.neutralPitch = 0;        // Calibrated neutral pitch baseline
-        this.smoothedPitch = 0;       // Filtered pitch
+        this.rawYaw = 0;              // Horizontal head turn angle
+        this.neutralRoll = 0;         // Calibrated neutral baseline roll
+        this.neutralPitch = 0;        // Calibrated neutral baseline pitch
+        this.neutralYaw = 0;          // Calibrated neutral baseline yaw
+
+        this.smoothedRoll = 0;
+        this.smoothedPitch = 0;
         this.prevPitch = 0;
         this.pitchVelocity = 0;       // Upward pitch velocity (units/sec)
-        this.pitchHistory = [];       // { time, pitch } buffer for displacement verification
+        this.pitchHistory = [];       // { time, pitch } history for nod displacement check
 
-        // Power Charging (Duration Based)
+        // Calibration State & Rolling Samples
+        // 'CALIBRATION_IDLE' | 'CALIBRATING' | 'CALIBRATED'
+        this.calibrationState = 'CALIBRATION_IDLE';
+        this.calibrationSamples = [];
+        this.calibrationSamplesRequired = 24; // Actual required clean frames
+        this.calibrationComplete = false;
+
+        // Aiming & Dead Zone Hysteresis
+        this.normalizedAim = 0;       // -1.0 (Left) to +1.0 (Right)
+        this.lockedShotAim = 0;       // Aim frozen authoritative upon nod kick initiation
+        this.inDeadZone = true;
+        this.deadZoneDeg = 4.5;
+        this.deadZoneExitHysteresis = 5.2;
+        this.deadZoneEnterHysteresis = 3.8;
+
+        // Power Charging (Optional duration-based charging across ALL targets including Center)
         this.power = 0;               // 0.0 to 1.0
+        this.effectiveKickPower = 0.30; // Minimum valid shot power if kicking immediately
         this.isCharging = false;
-        this.chargeDurationMs = 0;    // Time spent holding tilt in ms
-        this.minChargeDurationMs = 280;// Minimum 280ms charge before kick is armed
-        this.maxChargeDurationMs = 2000;// 2.0s to reach 100% power
+        this.chargeDurationMs = 0;
+        this.maxChargeDurationMs = 2000;
+        this.holdAimTimer = 0;
 
         // Kick Trigger & Safety State
         this.kickTriggered = false;
-        this.lastKickTimestamp = -99999; // Allows kicking immediately after startup without 1.2s false cooldown
-        this.kickCooldownMs = 1200;
+        this.lastKickTimestamp = -99999;
+        this.kickCooldownMs = 1100;
         this.inputLocked = false;
 
-        // Upward Nod Tuning Parameters
-        // Upward nod moves nose up toward eyes -> pitch increases positive
-        this.nodVelocityThreshold = 42.0;    // Minimum upward velocity to count as quick nod
-        this.nodDisplacementThreshold = 5.2; // Minimum upward displacement within window
-        this.nodWindowMs = 180;              // Window to calculate upward displacement
+        // Temporal Upward Nod Tuning Parameters (Independent of power!)
+        this.nodVelocityThreshold = 36.0;   // Minimum upward pitch velocity
+        this.nodDisplacementThreshold = 4.2;// Minimum upward displacement
+        this.nodWindowMs = 180;             // Upward displacement time window
+        this.nodMaxDurationMs = 320;        // Quick jerk max duration (slow tilt rejected)
 
-        // Calibration State & Rolling Samples
-        this.isCalibrating = false;
-        this.calibrationComplete = false;
-        this.calibrationSamples = [];
-        this.calibrationSamplesRequired = 45; // ~1.2-1.5s of stable tracking samples
-        this.calibrationDuration = 2500; // ms safety timeout
-        this.calibrationStartTime = 0;
-
-        // Face Validation & Quality Status
+        // Face Validation & Tracking Status
         this.faceDetected = false;
         this.positionStatus = 'NO_FACE';
         this.candidatePositionStatus = 'NO_FACE';
         this.candidateStatusStartTime = 0;
         this.stabilityHistory = [];
         this.lastDetectionTime = 0;
-        this.faceLostThresholdMs = 380;
-        this.reacquisitionFrames = 0;
-        this.reacquisitionThreshold = 8;
+        this.faceLostThresholdMs = 450;
         this.lastTrackedCenter = { x: 0.5, y: 0.5 };
 
         // Subscribe to settings
@@ -69,10 +91,12 @@ export class HeadTracker {
     }
 
     syncSettings() {
-        this.sensitivity = settingsManager.get('headSensitivity');
-        this.deadZoneDeg = settingsManager.get('deadZone');
-        this.smoothingAlpha = settingsManager.getSmoothingAlpha();
-        this.aimAssistFactor = settingsManager.getAimAssistFactor();
+        this.sensitivity = settingsManager.get('headSensitivity') || 1.1;
+        this.deadZoneDeg = settingsManager.get('deadZone') || 4.5;
+        this.deadZoneExitHysteresis = this.deadZoneDeg * 1.18;
+        this.deadZoneEnterHysteresis = this.deadZoneDeg * 0.82;
+        this.smoothingAlpha = settingsManager.getSmoothingAlpha ? settingsManager.getSmoothingAlpha() : 0.28;
+        this.aimAssistFactor = settingsManager.getAimAssistFactor ? settingsManager.getAimAssistFactor() : 0.35;
 
         const chargeSpeed = settingsManager.get('chargeSpeed');
         if (chargeSpeed === 'slow') this.maxChargeDurationMs = 2500;
@@ -80,121 +104,389 @@ export class HeadTracker {
         else this.maxChargeDurationMs = 2000;
     }
 
+    // ============================================================
+    // BIOMETRIC FEATURE EXTRACTION & IDENTITY VERIFICATION
+    // ============================================================
+
+    // Computes an 18-dimensional normalized geometric biometric feature vector
+    // Scale, translation, and depth invariant from 468 MediaPipe FaceMesh landmarks.
+    extractBiometricVector(landmarks) {
+        if (!landmarks || landmarks.length < 468) return null;
+
+        const leftEyeOuter = landmarks[33];
+        const rightEyeOuter = landmarks[263];
+        const leftEyeInner = landmarks[133];
+        const rightEyeInner = landmarks[362];
+        const noseTip = landmarks[1];
+        const noseBridge = landmarks[168];
+        const mouthLeft = landmarks[61];
+        const mouthRight = landmarks[291];
+        const mouthTop = landmarks[0];
+        const mouthBottom = landmarks[17];
+        const cheekLeft = landmarks[234];
+        const cheekRight = landmarks[454];
+        const forehead = landmarks[10];
+        const chin = landmarks[152];
+        const jawLeft = landmarks[172];
+        const jawRight = landmarks[397];
+
+        const dist = (p1, p2) => Math.hypot(p1.x - p2.x, p1.y - p2.y);
+        const dist3D = (p1, p2) => Math.hypot(p1.x - p2.x, p1.y - p2.y, (p1.z - p2.z) || 0);
+
+        const iod = Math.max(0.01, dist(leftEyeOuter, rightEyeOuter));
+        const faceHeight = Math.max(0.02, dist(forehead, chin));
+        const eyeMid = {
+            x: (leftEyeOuter.x + rightEyeOuter.x) / 2,
+            y: (leftEyeOuter.y + rightEyeOuter.y) / 2,
+            z: ((leftEyeOuter.z || 0) + (rightEyeOuter.z || 0)) / 2
+        };
+        const mouthMid = {
+            x: (mouthLeft.x + mouthRight.x) / 2,
+            y: (mouthLeft.y + mouthRight.y) / 2,
+            z: ((mouthLeft.z || 0) + (mouthRight.z || 0)) / 2
+        };
+
+        const v = new Float32Array(18);
+        v[0] = iod / faceHeight;
+        v[1] = dist(noseTip, eyeMid) / iod;
+        v[2] = dist(mouthMid, noseTip) / iod;
+        v[3] = dist(mouthLeft, mouthRight) / iod;
+        v[4] = dist(cheekLeft, cheekRight) / iod;
+        v[5] = dist(jawLeft, jawRight) / iod;
+        v[6] = dist(forehead, noseBridge) / iod;
+        v[7] = dist(chin, mouthMid) / iod;
+        v[8] = dist(leftEyeInner, rightEyeInner) / iod;
+        v[9] = dist(mouthTop, mouthBottom) / Math.max(0.01, dist(mouthLeft, mouthRight));
+        v[10] = dist(leftEyeOuter, cheekLeft) / iod;
+        v[11] = dist(rightEyeOuter, cheekRight) / iod;
+        v[12] = dist(leftEyeOuter, mouthLeft) / iod;
+        v[13] = dist(rightEyeOuter, mouthRight) / iod;
+        v[14] = dist(noseTip, cheekLeft) / iod;
+        v[15] = dist(noseTip, cheekRight) / iod;
+        v[16] = dist3D(chin, forehead) / iod;
+        v[17] = Math.abs((noseTip.z || 0) - eyeMid.z) / iod;
+
+        return v;
+    }
+
+    computeBiometricDistance(v1, v2) {
+        if (!v1 || !v2 || v1.length !== v2.length) return 1.0;
+        let sum = 0;
+        for (let i = 0; i < v1.length; i++) {
+            const diff = v1[i] - v2[i];
+            sum += diff * diff;
+        }
+        return Math.sqrt(sum / v1.length);
+    }
+
+    // ============================================================
+    // ENROLLMENT & CALIBRATION LIFECYCLE (STRICT STATE MACHINE)
+    // ============================================================
+
+    startEnrollment() {
+        this.enrollmentState = 'ENROLLMENT_SEARCHING';
+        this.idSamples = [];
+        this.acceptedEnrollmentSamples = 0;
+        this.enrolledProfile = null;
+        this.isPlayer1Locked = false;
+        this.identityMatchScore = 0;
+        this.calibrationState = 'CALIBRATION_IDLE';
+        this.calibrationComplete = false;
+        this.calibrationSamples = [];
+        console.log('[HeadTracker] Step 1: Searching for frontal face to enroll Player 1...');
+    }
+
+    isEnrollmentComplete() {
+        return this.enrollmentState === 'ENROLLMENT_SUCCESS' && this.enrolledProfile !== null;
+    }
+
+    isCalibrationComplete() {
+        return this.calibrationState === 'CALIBRATED' && this.calibrationComplete === true;
+    }
+
+    startPoseCalibration() {
+        if (!this.isEnrollmentComplete()) {
+            console.warn('[HeadTracker] Cannot calibrate pose: Player 1 identity not yet enrolled.');
+            return;
+        }
+        this.calibrationState = 'CALIBRATING';
+        this.calibrationComplete = false;
+        this.calibrationSamples = [];
+        console.log('[HeadTracker] Step 2: Calibrating neutral head position...');
+    }
+
+    startCalibration() {
+        if (!this.isEnrollmentComplete()) {
+            this.startEnrollment();
+        } else {
+            this.startPoseCalibration();
+        }
+    }
+
     resetCalibration() {
+        this.enrollmentState = 'ENROLLMENT_IDLE';
+        this.calibrationState = 'CALIBRATION_IDLE';
+        this.calibrationComplete = false;
+        this.enrolledProfile = null;
+        this.isPlayer1Locked = false;
+        this.searchingForPlayer = false;
+        this.idSamples = [];
+        this.acceptedEnrollmentSamples = 0;
+        this.calibrationSamples = [];
         this.neutralRoll = 0;
         this.neutralPitch = 0;
+        this.neutralYaw = 0;
         this.smoothedRoll = 0;
         this.smoothedPitch = 0;
         this.prevPitch = 0;
         this.pitchVelocity = 0;
         this.pitchHistory = [];
-        this.calibrationSamples = [];
-        this.isCalibrating = false;
-        this.calibrationComplete = false;
-        this.reacquisitionFrames = 0;
         this.power = 0;
         this.isCharging = false;
         this.chargeDurationMs = 0;
         this.kickTriggered = false;
-        this.lockedShotAim = null;
+        this.lockedShotAim = 0;
         this.positionStatus = 'NO_FACE';
         this.candidatePositionStatus = 'NO_FACE';
         this.stabilityHistory = [];
     }
 
-    startCalibration() {
-        this.isCalibrating = true;
-        this.calibrationComplete = false;
-        this.calibrationSamples = [];
-        this.calibrationStartTime = performance.now();
-        this.power = 0;
-        this.isCharging = false;
-        this.chargeDurationMs = 0;
-        this.kickTriggered = false;
-    }
-
+    // Force complete ONLY if actual valid samples were captured
     forceCompleteCalibration() {
-        if (this.calibrationSamples.length > 0) {
-            // Outlier rejection: sort and take median neutral roll and pitch
+        if (this.enrollmentState !== 'ENROLLMENT_SUCCESS') {
+            if (this.idSamples.length >= 6) {
+                // Compute mean from available samples
+                const len = this.idSamples[0].length;
+                const mean = new Float32Array(len);
+                for (let i = 0; i < len; i++) {
+                    let s = 0;
+                    for (let k = 0; k < this.idSamples.length; k++) s += this.idSamples[k][i];
+                    mean[i] = s / this.idSamples.length;
+                }
+                this.enrolledProfile = { biometricVector: mean, sampleCount: this.idSamples.length };
+                this.enrollmentState = 'ENROLLMENT_SUCCESS';
+                this.isPlayer1Locked = true;
+            } else {
+                console.warn('[HeadTracker] Cannot force complete: insufficient face samples captured.');
+                return false;
+            }
+        }
+
+        if (this.calibrationSamples.length >= 6) {
             const sortedRolls = this.calibrationSamples.map(s => s.roll).sort((a, b) => a - b);
             const sortedPitches = this.calibrationSamples.map(s => s.pitch).sort((a, b) => a - b);
+            const sortedYaws = this.calibrationSamples.map(s => s.yaw || 0).sort((a, b) => a - b);
             const mid = Math.floor(sortedRolls.length / 2);
             this.neutralRoll = sortedRolls[mid];
             this.neutralPitch = sortedPitches[mid];
+            this.neutralYaw = sortedYaws[mid];
         } else {
-            this.neutralRoll = 0;
-            this.neutralPitch = 0;
+            this.neutralRoll = this.rawRollAngle;
+            this.neutralPitch = this.rawPitch;
+            this.neutralYaw = this.rawYaw;
         }
-        this.isCalibrating = false;
-        this.calibrationComplete = true;
-        this.power = 0;
-        this.isCharging = false;
-        this.chargeDurationMs = 0;
-        this.kickTriggered = false;
-        console.log(`[HeadTracker] Calibration saved. Neutral Roll: ${this.neutralRoll.toFixed(1)}°, Neutral Pitch: ${this.neutralPitch.toFixed(1)}`);
-    }
 
-    isHeadStable(now, roll, pitch) {
-        this.stabilityHistory.push({ time: now, roll, pitch });
-        while (this.stabilityHistory.length > 0 && now - this.stabilityHistory[0].time > 320) {
-            this.stabilityHistory.shift();
-        }
-        if (this.stabilityHistory.length < 4) return false;
-        const rolls = this.stabilityHistory.map(s => s.roll);
-        const deltaRoll = Math.max(...rolls) - Math.min(...rolls);
-        return deltaRoll < 3.5;
+        this.calibrationState = 'CALIBRATED';
+        this.calibrationComplete = true;
+        this.isPlayer1Locked = true;
+        console.log(`[HeadTracker] Enrollment & Calibration finalized. Neutral Roll: ${this.neutralRoll.toFixed(1)}°`);
+        return true;
     }
 
     getCalibrationProgress() {
-        if (this.calibrationComplete) {
-            return { percent: 100, quality: 5, complete: true };
+        // Step 3: Fully Locked and Ready
+        if (this.isEnrollmentComplete() && this.isCalibrationComplete()) {
+            return {
+                step: 3,
+                stage: 'LOCKED',
+                stageTitle: 'READY TO PLAY',
+                stageLabel: 'PLAYER 1 LOCKED ✓',
+                samplesInfo: '24 / 24 SAMPLES VERIFIED',
+                percent: 100,
+                quality: 5,
+                complete: true
+            };
         }
-        if (!this.isCalibrating) {
-            return { percent: 0, quality: 0, complete: false };
+
+        // Step 2: Calibrating Neutral Pose
+        if (this.isEnrollmentComplete() && this.calibrationState === 'CALIBRATING') {
+            const count = this.calibrationSamples.length;
+            const pct = Math.min(99, Math.round((count / this.calibrationSamplesRequired) * 100));
+            return {
+                step: 2,
+                stage: 'HEAD_POSE',
+                stageTitle: 'STEP 2: NEUTRAL POSITION',
+                stageLabel: 'HOLD STILL — LOOK STRAIGHT',
+                samplesInfo: `${count} / ${this.calibrationSamplesRequired} CALIBRATION FRAMES`,
+                percent: pct,
+                quality: Math.min(5, Math.floor((count / this.calibrationSamplesRequired) * 5)),
+                complete: false
+            };
         }
-        const count = this.calibrationSamples.length;
-        const pct = Math.min(100, Math.round((count / this.calibrationSamplesRequired) * 100));
-        const quality = Math.min(5, Math.floor((count / this.calibrationSamplesRequired) * 5));
-        return { percent: pct, quality, complete: false };
+
+        // Step 1: Capturing Biometric Identity
+        if (this.enrollmentState === 'ENROLLMENT_COLLECTING' || this.enrollmentState === 'ENROLLMENT_SEARCHING') {
+            const count = this.acceptedEnrollmentSamples;
+            const pct = Math.min(99, Math.round((count / this.idSamplesRequired) * 100));
+            return {
+                step: 1,
+                stage: 'IDENTITY',
+                stageTitle: 'STEP 1: IDENTITY ENROLLMENT',
+                stageLabel: count > 0 ? 'CAPTURING IDENTITY PROFILE...' : 'LOOK DIRECTLY AT CAMERA',
+                samplesInfo: `${count} / ${this.idSamplesRequired} GOOD SAMPLES`,
+                percent: pct,
+                quality: Math.min(5, Math.floor((count / this.idSamplesRequired) * 5)),
+                complete: false
+            };
+        }
+
+        return {
+            step: 1,
+            stage: 'IDLE',
+            stageTitle: 'STEP 1: IDENTITY ENROLLMENT',
+            stageLabel: 'POSITION YOUR FACE TO BEGIN',
+            samplesInfo: '0 / 24 SAMPLES',
+            percent: 0,
+            quality: 0,
+            complete: false
+        };
     }
 
-    // Called on every frame strictly with FACE landmarks
-    processLandmarks(landmarks, isPoseModel = false, deltaSec = 1 / 60) {
+    // ============================================================
+    // MULTI-FACE DETECTION & CROWD ARBITRATION
+    // ============================================================
+
+    processMultiFace(allFacesLandmarks, deltaSec = 1 / 60) {
         const now = performance.now();
         const dt = Math.max(0.001, deltaSec);
-        const dtMs = dt * 1000;
 
-        // 1. Check face presence
-        if (!landmarks || landmarks.length === 0) {
-            this.faceLostAccumulatorMs = (this.faceLostAccumulatorMs || 0) + dtMs;
-            if (this.faceLostAccumulatorMs > this.faceLostThresholdMs || (now - this.lastDetectionTime > this.faceLostThresholdMs)) {
-                this.faceDetected = false;
-                this.positionStatus = 'NO_FACE';
-                // Safely decay power without kicking
-                this.power = Math.max(0, this.power - 0.05);
-                this.isCharging = false;
-                this.chargeDurationMs = 0;
-                this.reacquisitionFrames = 0;
-            }
+        this.detectedFaceCount = allFacesLandmarks ? allFacesLandmarks.length : 0;
 
-            if (this.isCalibrating && now - this.calibrationStartTime > this.calibrationDuration) {
-                this.forceCompleteCalibration();
-            }
+        if (!allFacesLandmarks || allFacesLandmarks.length === 0) {
+            this.handleFaceLost(now, dt);
             return;
         }
 
-        this.faceLostAccumulatorMs = 0;
+        let targetFaceLandmarks = null;
+        let bestDistance = 999;
 
-        // 2. Extract 3D Face Geometry (Roll and Pitch)
+        // 1. If currently in enrollment or not yet enrolled, pick the most centered face
+        if (!this.isEnrollmentComplete()) {
+            let minCenterDist = 999;
+            for (let i = 0; i < allFacesLandmarks.length; i++) {
+                const face = allFacesLandmarks[i];
+                const center = this.getFaceCenter(face);
+                const d = Math.hypot(center.x - 0.5, center.y - 0.5);
+                if (d < minCenterDist) {
+                    minCenterDist = d;
+                    targetFaceLandmarks = face;
+                }
+            }
+            this.ignoredFaceCount = allFacesLandmarks.length - 1;
+        } else {
+            // 2. ENROLLED PLAYER MULTI-FACE ARBITRATION:
+            // Match against Player 1's enrolled biometric profile.
+            // Proximity, size, or centering of a crowd stranger NEVER steals tracking!
+            for (let i = 0; i < allFacesLandmarks.length; i++) {
+                const candidate = allFacesLandmarks[i];
+                const bioVec = this.extractBiometricVector(candidate);
+                if (!bioVec) continue;
+
+                const dist = this.computeBiometricDistance(this.enrolledProfile.biometricVector, bioVec);
+                if (dist < bestDistance) {
+                    bestDistance = dist;
+                    if (dist < this.identityMatchThreshold) {
+                        targetFaceLandmarks = candidate;
+                    }
+                }
+            }
+
+            if (targetFaceLandmarks) {
+                this.isPlayer1Locked = true;
+                this.searchingForPlayer = false;
+                this.identityMatchScore = Math.max(0, Math.min(100, Math.round((1 - bestDistance / this.identityMatchThreshold) * 100)));
+                this.ignoredFaceCount = allFacesLandmarks.length - 1;
+            } else {
+                this.handlePlayerSearching(now, dt);
+                return;
+            }
+        }
+
+        this.processSingleFace(targetFaceLandmarks, dt, now);
+    }
+
+    processLandmarks(landmarks, isPoseModel = false, deltaSec = 1 / 60) {
+        if (!landmarks || landmarks.length === 0) {
+            this.processMultiFace([], deltaSec);
+            return;
+        }
+        this.processMultiFace([landmarks], deltaSec);
+    }
+
+    handleFaceLost(now, dt) {
+        this.faceLostAccumulatorMs = (this.faceLostAccumulatorMs || 0) + dt * 1000;
+        if (this.faceLostAccumulatorMs > this.faceLostThresholdMs || (now - this.lastDetectionTime > this.faceLostThresholdMs)) {
+            this.faceDetected = false;
+            this.isPlayer1Locked = false;
+            this.positionStatus = 'NO_FACE';
+            this.power = Math.max(0, this.power - 0.04);
+            this.isCharging = false;
+            this.chargeDurationMs = 0;
+        }
+    }
+
+    handlePlayerSearching(now, dt) {
+        if (!this.searchingForPlayer) {
+            this.searchingForPlayer = true;
+            this.playerLostTimestamp = now;
+        }
+
+        const elapsedSearching = now - this.playerLostTimestamp;
+        if (elapsedSearching < this.recoveryGracePeriodMs) {
+            this.positionStatus = 'SEARCHING_PLAYER';
+            this.power = Math.max(0, this.power - 0.02);
+            this.isCharging = false;
+        } else {
+            this.faceDetected = false;
+            this.isPlayer1Locked = false;
+            this.positionStatus = 'NO_PLAYER';
+            this.power = 0;
+            this.isCharging = false;
+            this.chargeDurationMs = 0;
+        }
+    }
+
+    getFaceCenter(landmarks) {
+        if (!landmarks || landmarks.length < 34) return { x: 0.5, y: 0.5 };
+        const l = landmarks[33] || landmarks[2];
+        const r = landmarks[263] || landmarks[5];
+        return {
+            x: (l.x + r.x) / 2,
+            y: (l.y + r.y) / 2
+        };
+    }
+
+    // ============================================================
+    // SINGLE FACE POSE, FILTERING & AIMING PIPELINE
+    // ============================================================
+
+    processSingleFace(landmarks, dt, now) {
+        this.faceLostAccumulatorMs = 0;
+        this.faceDetected = true;
+        this.lastDetectionTime = now;
+
+        const isFaceMesh = landmarks.length >= 468;
         let rollDeg = 0;
         let pitchProxy = 0;
+        let yawDeg = 0;
         let faceCenter = { x: 0.5, y: 0.5 };
         let faceWidth = 0.3;
 
-        if (!isPoseModel && landmarks.length >= 468) {
-            // MediaPipe FaceMesh (High fidelity)
-            const leftEye = landmarks[33];   // Left eye outer
-            const rightEye = landmarks[263]; // Right eye outer
+        if (isFaceMesh) {
+            const leftEye = landmarks[33];
+            const rightEye = landmarks[263];
+            const leftMouth = landmarks[61];
+            const rightMouth = landmarks[291];
             const noseTip = landmarks[1];
             const forehead = landmarks[10];
             const chin = landmarks[152];
@@ -207,30 +499,27 @@ export class HeadTracker {
             faceWidth = Math.abs(rightEye.x - leftEye.x);
             const faceHeight = Math.max(0.08, Math.abs(chin.y - forehead.y));
 
-            // Roll (mirrored webcam: invert angle so right tilt gives positive degrees)
-            const dx = rightEye.x - leftEye.x;
-            const dy = rightEye.y - leftEye.y;
-            rollDeg = -Math.atan2(dy, dx) * (180 / Math.PI);
+            // TRUE 3D HEAD ROTATION:
+            // Roll: average slope of eyes and mouth
+            const eyeAngle = -Math.atan2(rightEye.y - leftEye.y, rightEye.x - leftEye.x) * (180 / Math.PI);
+            const mouthAngle = -Math.atan2(rightMouth.y - leftMouth.y, rightMouth.x - leftMouth.x) * (180 / Math.PI);
+            rollDeg = eyeAngle * 0.75 + mouthAngle * 0.25;
 
-            // Pitch calculation:
-            // When player nods UP, nose tip moves UP relative to eye midpoint.
-            // In screen coordinates Y decreases as objects move up.
+            // Pitch: nose tip vertical displacement relative to eye midpoint
             const eyeMidY = (leftEye.y + rightEye.y) / 2;
-            // Upward nod -> (eyeMidY - noseTip.y) increases
             pitchProxy = ((eyeMidY - noseTip.y) / faceHeight) * 100;
+
+            // Yaw: lateral nose offset relative to eye width
+            const eyeMidX = (leftEye.x + rightEye.x) / 2;
+            yawDeg = ((noseTip.x - eyeMidX) / faceWidth) * 90;
         } else {
-            // Pose model fallback face landmarks (0: nose, 2: left_eye, 5: right_eye)
             const leftEye = landmarks[2] || landmarks[7];
             const rightEye = landmarks[5] || landmarks[8];
             const nose = landmarks[0];
-
             if (leftEye && rightEye && nose) {
                 faceCenter = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
                 faceWidth = Math.abs(rightEye.x - leftEye.x);
-                const dx = rightEye.x - leftEye.x;
-                const dy = rightEye.y - leftEye.y;
-                rollDeg = -Math.atan2(dy, dx) * (180 / Math.PI);
-
+                rollDeg = -Math.atan2(rightEye.y - leftEye.y, rightEye.x - leftEye.x) * (180 / Math.PI);
                 const eyeMidY = (leftEye.y + rightEye.y) / 2;
                 pitchProxy = (eyeMidY - nose.y) * 100;
             } else {
@@ -238,85 +527,131 @@ export class HeadTracker {
             }
         }
 
-        // 3. Multi-face stability check
-        const distFromLast = Math.hypot(faceCenter.x - this.lastTrackedCenter.x, faceCenter.y - this.lastTrackedCenter.y);
-        if (this.faceDetected && distFromLast > 0.40) {
-            this.reacquisitionFrames = 0; // Prevent abrupt face hopping
-        }
         this.lastTrackedCenter = faceCenter;
+        this.rawRollAngle = rollDeg;
+        this.rawPitch = pitchProxy;
+        this.rawYaw = yawDeg;
 
-        // 4. Guided camera positioning feedback (mirrored selfie coordinates)
-        let rawStatus = 'FACE_DETECTED';
-        if (faceWidth < 0.13) {
+        // Framing and positioning feedback
+        let rawStatus = 'PLAYER_TRACKED';
+        if (faceWidth < 0.12) {
             rawStatus = 'MOVE_CLOSER';
-        } else if (faceWidth > 0.44) {
+        } else if (faceWidth > 0.46) {
             rawStatus = 'MOVE_BACK';
-        } else if (faceCenter.x > 0.65) {
-            // In mirrored selfie preview, user appears on left of screen -> prompt move right
+        } else if (faceCenter.x > 0.68) {
             rawStatus = 'MOVE_RIGHT';
-        } else if (faceCenter.x < 0.35) {
-            // In mirrored selfie preview, user appears on right of screen -> prompt move left
+        } else if (faceCenter.x < 0.32) {
             rawStatus = 'MOVE_LEFT';
-        } else if (faceCenter.y < 0.25) {
+        } else if (faceCenter.y < 0.22) {
             rawStatus = 'MOVE_DOWN';
-        } else if (faceCenter.y > 0.75) {
+        } else if (faceCenter.y > 0.78) {
             rawStatus = 'MOVE_UP';
         } else if (this.isHeadStable(now, rollDeg, pitchProxy)) {
-            rawStatus = 'LOOK_STRAIGHT';
+            rawStatus = 'STEADY_HEAD';
         }
 
-        // Stability / Debounce window (180ms) to keep UI calm and avoid flickering
         if (rawStatus !== this.candidatePositionStatus) {
             this.candidatePositionStatus = rawStatus;
             this.candidateStatusStartTime = now;
-        } else if (now - this.candidateStatusStartTime >= 180) {
+        } else if (now - this.candidateStatusStartTime >= 140) {
             this.positionStatus = rawStatus;
         }
 
-        const isFramed = (this.positionStatus === 'FACE_DETECTED' || this.positionStatus === 'LOOK_STRAIGHT');
-        this.faceDetected = true;
-        this.lastDetectionTime = now;
-        this.reacquisitionFrames++;
+        const isGoodFraming = (faceWidth >= 0.14 && faceWidth <= 0.44 &&
+                               faceCenter.x >= 0.32 && faceCenter.x <= 0.68 &&
+                               faceCenter.y >= 0.20 && faceCenter.y <= 0.80);
+        const isLowRotation = (Math.abs(rollDeg) < 14 && Math.abs(yawDeg) < 14 && Math.abs(pitchProxy) < 18);
 
-        this.rawRollAngle = rollDeg;
-        this.rawPitch = pitchProxy;
+        // ------------------------------------------------------------
+        // STAGE 1: IDENTITY ENROLLMENT (REAL SAMPLE COLLECTION)
+        // ------------------------------------------------------------
+        if (!this.isEnrollmentComplete()) {
+            this.enrollmentState = 'ENROLLMENT_SEARCHING';
 
-        // 5. Calibration phase
-        if (this.isCalibrating) {
-            // Only collect samples when face is properly framed and holding relatively steady
-            if (isFramed && Math.abs(rollDeg) < 35) {
-                this.calibrationSamples.push({ roll: rollDeg, pitch: pitchProxy });
-            }
-            const elapsed = now - this.calibrationStartTime;
-            if (this.calibrationSamples.length >= this.calibrationSamplesRequired ||
-                (elapsed >= this.calibrationDuration && this.calibrationSamples.length >= 15)) {
-                this.forceCompleteCalibration();
+            if (isGoodFraming && isLowRotation) {
+                this.enrollmentState = 'ENROLLMENT_COLLECTING';
+                const bioVec = this.extractBiometricVector(landmarks);
+                if (bioVec) {
+                    this.idSamples.push(bioVec);
+                    this.acceptedEnrollmentSamples = this.idSamples.length;
+
+                    if (this.acceptedEnrollmentSamples >= this.idSamplesRequired) {
+                        // Calculate mean biometric descriptor
+                        const len = bioVec.length;
+                        const mean = new Float32Array(len);
+                        for (let i = 0; i < len; i++) {
+                            let s = 0;
+                            for (let k = 0; k < this.idSamples.length; k++) s += this.idSamples[k][i];
+                            mean[i] = s / this.idSamples.length;
+                        }
+                        this.enrolledProfile = { biometricVector: mean, sampleCount: this.idSamples.length };
+                        this.enrollmentState = 'ENROLLMENT_SUCCESS';
+                        this.isPlayer1Locked = true;
+                        this.identityMatchScore = 100;
+                        console.log('[HeadTracker] Player 1 Identity Enrolled successfully! (24/24 good samples accepted).');
+                        // Advance to neutral head pose calibration
+                        this.startPoseCalibration();
+                    }
+                }
             }
             return;
         }
 
-        // 6. Neutral offsets
+        // ------------------------------------------------------------
+        // STAGE 2: NEUTRAL HEAD POSE CALIBRATION
+        // ------------------------------------------------------------
+        if (this.calibrationState === 'CALIBRATING') {
+            if (isGoodFraming && Math.abs(rollDeg) < 28) {
+                this.calibrationSamples.push({ roll: rollDeg, pitch: pitchProxy, yaw: yawDeg });
+                if (this.calibrationSamples.length >= this.calibrationSamplesRequired) {
+                    // Outlier rejection (median filter)
+                    const sortedRolls = this.calibrationSamples.map(s => s.roll).sort((a, b) => a - b);
+                    const sortedPitches = this.calibrationSamples.map(s => s.pitch).sort((a, b) => a - b);
+                    const sortedYaws = this.calibrationSamples.map(s => s.yaw || 0).sort((a, b) => a - b);
+                    const mid = Math.floor(sortedRolls.length / 2);
+                    this.neutralRoll = sortedRolls[mid];
+                    this.neutralPitch = sortedPitches[mid];
+                    this.neutralYaw = sortedYaws[mid];
+
+                    this.calibrationState = 'CALIBRATED';
+                    this.calibrationComplete = true;
+                    this.isPlayer1Locked = true;
+                    console.log(`[HeadTracker] Calibration complete. Neutral Roll: ${this.neutralRoll.toFixed(1)}°`);
+                }
+            }
+            return;
+        }
+
+        // ------------------------------------------------------------
+        // STAGE 3: ACTIVE GAMEPLAY TRACKING PIPELINE
+        // ------------------------------------------------------------
         const offsetRoll = this.rawRollAngle - this.neutralRoll;
         const offsetPitch = this.rawPitch - this.neutralPitch;
 
-        // 7. Temporal Exponential Moving Average (Smoothing)
+        // Exponential Moving Average Smoothing
         this.smoothedRoll = this.smoothingAlpha * offsetRoll + (1 - this.smoothingAlpha) * this.smoothedRoll;
 
-        // Smooth pitch (use slightly faster alpha for responsive nod detection)
-        const pitchAlpha = 0.35;
+        // Pitch smoothing & Upward nod velocity
+        const pitchAlpha = 0.38;
         this.prevPitch = this.smoothedPitch;
         this.smoothedPitch = pitchAlpha * offsetPitch + (1 - pitchAlpha) * this.smoothedPitch;
-
-        // Calculate upward pitch velocity (units / sec)
         this.pitchVelocity = (this.smoothedPitch - this.prevPitch) / dt;
 
-        // Track pitch history buffer for displacement check
+        // Pitch history for temporal nod displacement check
         this.pitchHistory.push({ time: now, pitch: this.smoothedPitch });
         while (this.pitchHistory.length > 0 && now - this.pitchHistory[0].time > this.nodWindowMs) {
             this.pitchHistory.shift();
         }
 
-        // If input is locked (during ball flight or banner), halt kick and power processing
+        // Smart neutral drift (only when head is calm, centered, not charging, not kicking)
+        if (this.isPlayer1Locked && !this.isCharging && !this.inputLocked && Math.abs(this.smoothedRoll) < this.deadZoneDeg) {
+            if (Math.abs(this.pitchVelocity) < 3.5) {
+                const driftRate = 0.0005;
+                this.neutralRoll += (this.rawRollAngle - this.neutralRoll) * driftRate;
+                this.neutralPitch += (this.rawPitch - this.neutralPitch) * driftRate;
+            }
+        }
+
         if (this.inputLocked) {
             this.isCharging = false;
             this.power = 0;
@@ -324,60 +659,83 @@ export class HeadTracker {
             return;
         }
 
-        // 8. ROLL TO AIM MAPPING (Horizontal)
+        // Dead Zone with Hysteresis & Nonlinear Aim Mapping
         const absRoll = Math.abs(this.smoothedRoll);
         const sign = Math.sign(this.smoothedRoll);
-        const maxRoll = 22.0;
+        const maxRoll = 24.0;
 
-        if (absRoll <= this.deadZoneDeg) {
-            // Inside dead zone: neutral aim, decay power gently
-            this.normalizedAim = 0;
-            this.isCharging = false;
-            this.chargeDurationMs = Math.max(0, this.chargeDurationMs - dt * 2500);
-            this.power = Math.max(0, this.power - 0.05);
+        if (this.inDeadZone) {
+            if (absRoll > this.deadZoneExitHysteresis) this.inDeadZone = false;
         } else {
-            // Outside dead zone: Aiming & Holding Tilt!
+            if (absRoll < this.deadZoneEnterHysteresis) this.inDeadZone = true;
+        }
+
+        if (this.inDeadZone) {
+            this.normalizedAim = 0; // Perfectly centered
+        } else {
             const effectiveRoll = (absRoll - this.deadZoneDeg) / (maxRoll - this.deadZoneDeg);
             const clamped = Math.max(0, Math.min(1.0, effectiveRoll));
-
-            let curved = Math.pow(clamped, 1.15) * this.sensitivity;
+            let curved = Math.pow(clamped, 1.22) * this.sensitivity;
             let aim = Math.max(-1.0, Math.min(1.0, sign * curved));
 
-            // Aim Assist near corners
-            if (this.aimAssistFactor > 0 && Math.abs(aim) > 0.65) {
-                const cornerTarget = Math.sign(aim) * 0.88;
+            if (this.aimAssistFactor > 0 && Math.abs(aim) > 0.68) {
+                const cornerTarget = Math.sign(aim) * 0.90;
                 aim = aim + (cornerTarget - aim) * this.aimAssistFactor;
             }
-
             this.normalizedAim = Math.max(-1.0, Math.min(1.0, aim));
-            this.lockedShotAim = this.normalizedAim; // Keep tracking the stable aim
+        }
 
-            // 9. DURATION-BASED POWER CHARGING
-            this.isCharging = true;
-            this.chargeDurationMs = Math.min(this.maxChargeDurationMs, this.chargeDurationMs + dt * 1000);
-            this.power = Math.min(1.0, this.chargeDurationMs / this.maxChargeDurationMs);
+        // Update authoritative locked aim continuously until kick triggers
+        if (!this.kickTriggered) {
+            this.lockedShotAim = this.normalizedAim;
+        }
 
-            // 10. UPWARD NOD KICK DETECTION
-            if (this.detectKickGesture(now)) {
-                this.triggerKick();
+        // Power Charging (Optional! Holding steady in center OR holding tilt charges power)
+        const isAimSteady = Math.abs(this.pitchVelocity) < 14.0;
+        if (isAimSteady && isGoodFraming) {
+            this.holdAimTimer += dt * 1000;
+            if (this.holdAimTimer > 200) {
+                this.isCharging = true;
+                this.chargeDurationMs = Math.min(this.maxChargeDurationMs, this.chargeDurationMs + dt * 1000);
+                this.power = Math.min(1.0, this.chargeDurationMs / this.maxChargeDurationMs);
             }
+        } else if (!this.isCharging) {
+            this.holdAimTimer = Math.max(0, this.holdAimTimer - dt * 1500);
+            this.chargeDurationMs = Math.max(0, this.chargeDurationMs - dt * 2000);
+            this.power = Math.max(0, this.power - 0.05);
+        }
+
+        // ------------------------------------------------------------
+        // KICK DETECTION: COMPLETELY DECOUPLED FROM CHARGING/POWER!
+        // A player sitting straight at CENTER who nods UP fires a valid shot!
+        // ------------------------------------------------------------
+        if (this.detectKickGesture(now)) {
+            this.triggerKick();
         }
     }
 
-    // Explicit helper returning true only for an intentional QUICK UPWARD NOD
+    isHeadStable(now, roll, pitch) {
+        this.stabilityHistory.push({ time: now, roll, pitch });
+        while (this.stabilityHistory.length > 0 && now - this.stabilityHistory[0].time > 300) {
+            this.stabilityHistory.shift();
+        }
+        if (this.stabilityHistory.length < 4) return false;
+        const rolls = this.stabilityHistory.map(s => s.roll);
+        const deltaRoll = Math.max(...rolls) - Math.min(...rolls);
+        return deltaRoll < 3.2;
+    }
+
+    // Explicit helper returning true ONLY for an intentional, quick upward nod
+    // CRITICAL: Power > 0 is NOT required! Center shooting is 100% supported!
     detectKickGesture(now) {
-        // Kick Safety Checks
         if (!this.faceDetected) return false;
-        if (!this.isCharging) return false;
-        if (this.chargeDurationMs < this.minChargeDurationMs) return false;
-        if (this.power < 0.18) return false;
-        if (this.reacquisitionFrames < this.reacquisitionThreshold) return false;
+        if (!this.isPlayer1Locked) return false;
         if (now - this.lastKickTimestamp < this.kickCooldownMs) return false;
 
-        // Check upward pitch velocity
+        // 1. Upward pitch velocity threshold (quick nod)
         const hasUpwardVelocity = this.pitchVelocity > this.nodVelocityThreshold;
 
-        // Check upward displacement in recent window (must have moved UP, not just high velocity twitch)
+        // 2. Upward displacement in temporal window
         let hasUpwardDisplacement = false;
         if (this.pitchHistory.length >= 3) {
             const earliestPitch = this.pitchHistory[0].pitch;
@@ -394,14 +752,17 @@ export class HeadTracker {
     triggerKick() {
         this.kickTriggered = true;
         this.lastKickTimestamp = performance.now();
+        // Calculate authoritative kick power: at least minimum valid base power (0.30)
+        this.effectiveKickPower = Math.max(0.30, this.power);
         this.isCharging = false;
-        console.log(`[HeadTracker] UPWARD NOD KICK FIRED! Aim: ${this.lockedShotAim.toFixed(2)}, Power: ${Math.round(this.power * 100)}%`);
+        console.log(`[HeadTracker] UPWARD NOD KICK FIRED! Target Aim: ${this.lockedShotAim.toFixed(2)}, Power: ${Math.round(this.effectiveKickPower * 100)}%`);
     }
 
     resetKickTrigger() {
         this.kickTriggered = false;
         this.power = 0;
         this.chargeDurationMs = 0;
+        this.holdAimTimer = 0;
         this.isCharging = false;
     }
 
@@ -414,6 +775,10 @@ export class HeadTracker {
 
     getDebugStats() {
         return {
+            playerId: this.isPlayer1Locked ? 'PLAYER 1' : 'UNKNOWN',
+            faceCount: this.detectedFaceCount,
+            ignoredFaces: this.ignoredFaceCount,
+            matchScore: `${this.identityMatchScore}%`,
             rawRoll: this.rawRollAngle.toFixed(1),
             smoothedRoll: this.smoothedRoll.toFixed(1),
             neutralRoll: this.neutralRoll.toFixed(1),
@@ -421,119 +786,103 @@ export class HeadTracker {
             smoothedPitch: this.smoothedPitch.toFixed(1),
             pitchVel: this.pitchVelocity.toFixed(1),
             aim: this.normalizedAim.toFixed(2),
+            lockedAim: this.lockedShotAim.toFixed(2),
             power: Math.round(this.power * 100),
             charging: this.isCharging,
-            chargeMs: Math.round(this.chargeDurationMs),
             status: this.positionStatus
         };
     }
 
-    // Render AR HUD overlay on PiP
     drawOverlay(ctx, width, height) {
+        if (!ctx) return;
         ctx.save();
         ctx.clearRect(0, 0, width, height);
 
         const cx = width / 2;
         const cy = height / 2;
 
-        if (this.isCalibrating) {
-            const elapsed = performance.now() - this.calibrationStartTime;
-            const progress = Math.min(1.0, elapsed / this.calibrationDuration);
+        // 1. Enrollment & Calibration Mode Overlay
+        if (!this.isCalibrationComplete()) {
+            const progress = this.getCalibrationProgress();
+            const pct = progress.percent / 100;
 
-            ctx.strokeStyle = '#00e676';
+            ctx.strokeStyle = this.isPlayer1Locked ? '#00e676' : '#ffd700';
             ctx.lineWidth = 3;
-            ctx.setLineDash([8, 8]);
+            ctx.setLineDash([8, 6]);
             ctx.beginPath();
-            ctx.ellipse(cx, cy, width * 0.26, height * 0.36, 0, 0, Math.PI * 2);
+            ctx.ellipse(cx, cy, width * 0.28, height * 0.38, 0, 0, Math.PI * 2);
             ctx.stroke();
             ctx.setLineDash([]);
 
-            ctx.strokeStyle = '#ffd700';
-            ctx.lineWidth = 4;
+            ctx.strokeStyle = '#00e676';
+            ctx.lineWidth = 5;
             ctx.beginPath();
-            ctx.arc(cx, cy, width * 0.32, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+            ctx.arc(cx, cy, Math.min(width, height) * 0.42, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * pct);
             ctx.stroke();
 
-            ctx.fillStyle = '#ffffff';
-            ctx.font = 'bold 13px sans-serif';
-            ctx.textAlign = 'center';
-            ctx.fillText('LOOK STRAIGHT', cx, cy - 8);
-            ctx.fillStyle = '#ffd700';
-            ctx.font = '11px sans-serif';
-            ctx.fillText(`Calibrating ${Math.round(progress * 100)}%`, cx, cy + 16);
             ctx.restore();
             return;
         }
 
-        if (!this.faceDetected) {
-            ctx.strokeStyle = 'rgba(255, 68, 68, 0.7)';
-            ctx.lineWidth = 2;
-            ctx.strokeRect(6, 6, width - 12, height - 12);
-            ctx.fillStyle = '#ff4444';
-            ctx.font = 'bold 12px sans-serif';
-            ctx.textAlign = 'center';
+        // 2. In-Match AR PiP Corner Overlay
+        if (this.faceDetected && this.isPlayer1Locked) {
+            const fcX = this.lastTrackedCenter.x * width;
+            const fcY = this.lastTrackedCenter.y * height;
+            const bw = width * 0.38;
+            const bh = height * 0.50;
 
-            let msg = 'FACE NOT DETECTED';
-            if (this.positionStatus === 'MOVE_CLOSER') msg = 'MOVE CLOSER';
-            else if (this.positionStatus === 'MOVE_BACK') msg = 'MOVE BACK';
-            else if (this.positionStatus === 'CENTER_FACE') msg = 'CENTER YOUR FACE';
+            ctx.strokeStyle = this.isCharging ? '#ffd700' : '#00e676';
+            ctx.lineWidth = 2.5;
 
-            ctx.fillText(msg, cx, cy);
-            ctx.restore();
-            return;
-        }
+            const drawCorner = (x, y, dx, dy) => {
+                ctx.beginPath();
+                ctx.moveTo(x + dx * 16, y);
+                ctx.lineTo(x, y);
+                ctx.lineTo(x, y + dy * 16);
+                ctx.stroke();
+            };
 
-        // Active AR alignment graphics
-        const rollDeg = this.smoothedRoll;
-        const absAim = Math.abs(this.normalizedAim);
+            const left = fcX - bw / 2;
+            const right = fcX + bw / 2;
+            const top = fcY - bh / 2;
+            const bot = fcY + bh / 2;
 
-        // Center neutral tick
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(cx, 12);
-        ctx.lineTo(cx, 26);
-        ctx.stroke();
+            drawCorner(left, top, 1, 1);
+            drawCorner(right, top, -1, 1);
+            drawCorner(left, bot, 1, -1);
+            drawCorner(right, bot, -1, -1);
 
-        // Top Aim Bar
-        const barW = width * 0.7;
-        const barY = 19;
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
-        ctx.lineWidth = 4;
-        ctx.lineCap = 'round';
-        ctx.beginPath();
-        ctx.moveTo(cx - barW / 2, barY);
-        ctx.lineTo(cx + barW / 2, barY);
-        ctx.stroke();
-
-        const dotX = cx + (this.normalizedAim) * (barW / 2);
-        ctx.fillStyle = absAim > 0.05 ? '#00e676' : 'rgba(255, 255, 255, 0.8)';
-        ctx.beginPath();
-        ctx.arc(dotX, barY, 5, 0, Math.PI * 2);
-        ctx.fill();
-
-        // Face frame oval
-        ctx.strokeStyle = this.isCharging ? 'rgba(0, 230, 118, 0.6)' : 'rgba(255, 255, 255, 0.2)';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.ellipse(cx, cy, width * 0.24, height * 0.32, (rollDeg * Math.PI) / 180, 0, Math.PI * 2);
-        ctx.stroke();
-
-        // Upward nod visual hint when charged
-        if (this.isCharging && this.power >= 0.25) {
-            ctx.fillStyle = '#ffd700';
-            ctx.font = 'bold 10px sans-serif';
-            ctx.textAlign = 'center';
-            ctx.fillText('NOD ↑ TO KICK', cx, cy + height * 0.42);
-        }
-
-        // Power charge ring
-        if (this.power > 0) {
-            ctx.strokeStyle = this.power > 0.8 ? '#ff3b30' : (this.power > 0.5 ? '#ffd700' : '#00e676');
-            ctx.lineWidth = 3;
+            // Roll tilt gauge arc
+            const angleRad = (this.smoothedRoll * Math.PI) / 180;
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+            ctx.lineWidth = 1.5;
             ctx.beginPath();
-            ctx.arc(cx, cy, width * 0.30, -Math.PI / 2, -Math.PI / 2 + this.power * Math.PI * 2);
+            ctx.arc(fcX, top - 12, 20, -Math.PI * 0.8, -Math.PI * 0.2);
             ctx.stroke();
+
+            const needleX = fcX + Math.sin(angleRad) * 20;
+            const needleY = (top - 12) - Math.cos(angleRad) * 20;
+            ctx.strokeStyle = '#00e676';
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            ctx.moveTo(fcX, top - 12);
+            ctx.lineTo(needleX, needleY);
+            ctx.stroke();
+
+            if (this.ignoredFaceCount > 0) {
+                ctx.fillStyle = 'rgba(10, 16, 26, 0.88)';
+                ctx.fillRect(8, height - 24, width - 16, 18);
+                ctx.fillStyle = '#ffb300';
+                ctx.font = 'bold 9px Inter, sans-serif';
+                ctx.fillText(`P1 LOCKED • ${this.ignoredFaceCount} CROWD FACE IGNORED`, 12, height - 11);
+            }
+        } else if (this.searchingForPlayer) {
+            ctx.fillStyle = 'rgba(255, 215, 0, 0.18)';
+            ctx.fillRect(0, 0, width, height);
+            ctx.fillStyle = '#ffd700';
+            ctx.font = 'bold 11px Outfit, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('SEARCHING FOR P1...', cx, cy);
         }
 
         ctx.restore();

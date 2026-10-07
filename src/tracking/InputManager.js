@@ -1,13 +1,22 @@
 // Unified Input Manager for TILT KICK
 // Enforces complete architectural separation:
-// HEAD MODE: Strictly FACE-ONLY tracking.
-// BODY MODE: Stand & Play Pose tracking.
-// KEYBOARD: Full accessibility fallback.
+// High-Quality Camera Display & Inference Pipeline,
+// Multi-Face Crowd Arbitration, Biometric Identity Enrollment,
+// Head Tracking, Body Tracking, and Keyboard Accessibility.
 
 import { HeadTracker } from './HeadTracker.js';
 import { BodyTracker } from './BodyTracker.js';
 import { KeyboardTracker } from './KeyboardTracker.js';
 import { settingsManager } from '../utils/SettingsManager.js';
+
+export const CameraStates = Object.freeze({
+    IDLE: 'CAMERA_IDLE',
+    REQUESTING: 'CAMERA_REQUESTING',
+    READY: 'CAMERA_READY',
+    DENIED: 'CAMERA_DENIED',
+    UNAVAILABLE: 'CAMERA_UNAVAILABLE',
+    LOST: 'CAMERA_LOST'
+});
 
 export class InputManager {
     constructor() {
@@ -20,9 +29,16 @@ export class InputManager {
         this.canvasElement = null;
         this.ctx = null;
 
+        // Dedicated offscreen canvas for optimized tracking inference
+        // Separates pristine high-res camera preview from low-latency ML frames
+        this.inferenceCanvas = document.createElement('canvas');
+        this.inferenceCanvas.width = 640;
+        this.inferenceCanvas.height = 360;
+        this.inferenceCtx = this.inferenceCanvas.getContext('2d', { willReadFrequently: true });
+
         this.poseModel = null;
         this.faceMeshModel = null;
-        this.isCameraRunning = false;
+        this.cameraState = CameraStates.IDLE;
         this.isProcessingPaused = false;
         this.isProcessingLoopRunning = false;
         this.frameLoopId = null;
@@ -30,9 +46,11 @@ export class InputManager {
         this.cameraError = null;
         this.mediaStream = null;
         this.calPreviewVideo = null;
+        this.cameraSettings = null;
+        this.isKeyboardMode = false;
 
         this.cameraPreviewVisible = settingsManager.get('cameraPreview');
-        this.lastFaceProcessTime = performance.now();
+        this.lastProcessTime = performance.now();
 
         // Subscribe to settings
         settingsManager.subscribe((s) => {
@@ -48,6 +66,10 @@ export class InputManager {
 
     getMode() {
         return this.mode;
+    }
+
+    getCameraState() {
+        return this.cameraState;
     }
 
     setCameraPreviewVisible(visible) {
@@ -66,6 +88,7 @@ export class InputManager {
 
     isCameraActive() {
         return !!(
+            this.cameraState === CameraStates.READY &&
             this.mediaStream &&
             this.mediaStream.active &&
             this.mediaStream.getVideoTracks().some(t => t.readyState === 'live')
@@ -74,6 +97,10 @@ export class InputManager {
 
     getStream() {
         return this.mediaStream;
+    }
+
+    getCameraSettings() {
+        return this.cameraSettings;
     }
 
     pauseProcessing(paused = true) {
@@ -91,10 +118,15 @@ export class InputManager {
         }
     }
 
+    // ============================================================
+    // DETERMINISTIC CAMERA ACQUISITION & LIFECYCLE
+    // ============================================================
     async startCamera() {
-        // Idempotent: reuse existing stream if already live and active
+        this.isKeyboardMode = false;
+
+        // Reuse existing live stream if already fully ready
         if (this.isCameraActive()) {
-            console.log('[InputManager] MediaStream already active. Reusing single hardware stream.');
+            console.log('[InputManager] MediaStream already active and verified. Reusing hardware stream.');
             if (this.videoElement && this.videoElement.srcObject !== this.mediaStream) {
                 this.videoElement.srcObject = this.mediaStream;
                 this.videoElement.play().catch(() => {});
@@ -108,61 +140,142 @@ export class InputManager {
         }
 
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            this.cameraState = CameraStates.UNAVAILABLE;
             this.cameraAllowed = false;
             this.cameraError = 'NotSupportedError';
             return false;
         }
 
+        this.cameraState = CameraStates.REQUESTING;
+
         try {
-            console.log('[InputManager] Requesting camera access (getUserMedia)...');
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' }
-            });
+            console.log('[InputManager] Requesting high-definition front-camera stream (720p/1080p)...');
+
+            let stream = null;
+            // 1. First attempt: High Definition (1080p ideal, 720p minimum)
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        width: { ideal: 1920, min: 1280 },
+                        height: { ideal: 1080, min: 720 },
+                        facingMode: 'user',
+                        frameRate: { ideal: 30 }
+                    },
+                    audio: false
+                });
+            } catch (hdErr) {
+                console.warn('[InputManager] 1080p unavailable, attempting 720p fallback:', hdErr);
+                // Fallback attempt: Standard 720p
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 },
+                        facingMode: 'user'
+                    },
+                    audio: false
+                });
+            }
+
+            // 2. Strict hardware verification
+            const videoTracks = stream.getVideoTracks();
+            if (!videoTracks || videoTracks.length === 0) {
+                throw new Error('No video tracks available in stream');
+            }
+
+            const videoTrack = videoTracks[0];
+            if (videoTrack.readyState !== 'live') {
+                throw new Error(`Video track not live (state: ${videoTrack.readyState})`);
+            }
+
+            // Monitor track unexpected disconnect / death
+            videoTrack.onended = () => {
+                console.warn('[InputManager] Camera hardware stream was disconnected or ended.');
+                this.cameraState = CameraStates.LOST;
+                this.cameraAllowed = false;
+                this.cameraError = 'CameraStreamEnded';
+                this.stopCamera();
+            };
 
             this.mediaStream = stream;
-            this.cameraAllowed = true;
-            this.cameraError = null;
-            this.isCameraRunning = true;
-            this.isProcessingPaused = false;
+            this.cameraSettings = videoTrack.getSettings ? videoTrack.getSettings() : null;
 
+            // 3. Attach to display video and await loaded metadata and non-zero dimensions
             if (this.videoElement) {
                 this.videoElement.srcObject = stream;
-                await this.videoElement.play().catch(e => console.warn('[InputManager] Main video play note:', e));
+                await this.waitForVideoDimensions(this.videoElement);
             }
 
             if (this.calPreviewVideo) {
                 this.calPreviewVideo.srcObject = stream;
-                await this.calPreviewVideo.play().catch(e => console.warn('[InputManager] Cal video play note:', e));
+                this.calPreviewVideo.play().catch(() => {});
             }
+
+            // Now and only now declare CAMERA_READY
+            this.cameraState = CameraStates.READY;
+            this.cameraAllowed = true;
+            this.cameraError = null;
+            this.isProcessingPaused = false;
+
+            console.log(`[InputManager] CAMERA_READY: ${this.cameraSettings?.width || this.videoElement?.videoWidth || 'HD'}x${this.cameraSettings?.height || this.videoElement?.videoHeight || 'HD'} @ ${this.cameraSettings?.frameRate || 30}fps`);
 
             await this.initMediaPipeModels();
             this.startProcessingLoop();
 
-            console.log('[InputManager] Camera hardware stream acquired and processing loop active.');
             return true;
         } catch (err) {
-            console.warn('[InputManager] Camera access failed:', err);
+            console.warn('[InputManager] Camera initialization failed:', err);
             this.cameraAllowed = false;
-            this.cameraError = err.name || 'CameraUnavailable';
-            this.isCameraRunning = false;
+            this.mediaStream = null;
+
+            if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+                this.cameraState = CameraStates.DENIED;
+                this.cameraError = 'NotAllowedError';
+            } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+                this.cameraState = CameraStates.UNAVAILABLE;
+                this.cameraError = 'NotFoundError';
+            } else {
+                this.cameraState = CameraStates.UNAVAILABLE;
+                this.cameraError = err.name || 'CameraUnavailable';
+            }
+
             this.stopCamera();
             return false;
         }
     }
 
-    stopCamera() {
-        console.log('[InputManager] Stopping camera and releasing hardware...');
-        this.isCameraRunning = false;
-        this.isProcessingPaused = false;
+    waitForVideoDimensions(videoElement) {
+        return new Promise((resolve) => {
+            const check = () => {
+                if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
+                    resolve();
+                } else {
+                    requestAnimationFrame(check);
+                }
+            };
 
-        // 1. Cancel requestAnimationFrame processing loop
+            videoElement.play()
+                .then(() => check())
+                .catch(() => {
+                    // Try waiting on loadedmetadata
+                    videoElement.onloadedmetadata = () => check();
+                    // Resolve after timeout fallback to avoid blocking
+                    setTimeout(resolve, 1500);
+                });
+        });
+    }
+
+    stopCamera() {
+        console.log('[InputManager] Releasing camera hardware and stopping tracking loop...');
+        if (this.cameraState !== CameraStates.DENIED && this.cameraState !== CameraStates.UNAVAILABLE && this.cameraState !== CameraStates.LOST) {
+            this.cameraState = CameraStates.IDLE;
+        }
+
         if (this.frameLoopId) {
             cancelAnimationFrame(this.frameLoopId);
             this.frameLoopId = null;
         }
         this.isProcessingLoopRunning = false;
 
-        // 2. Stop all MediaStream tracks (hardware release)
         if (this.mediaStream) {
             try {
                 this.mediaStream.getTracks().forEach(track => {
@@ -175,25 +288,20 @@ export class InputManager {
             this.mediaStream = null;
         }
 
-        // 3. Clear video element sources
-        if (this.videoElement) {
-            this.videoElement.srcObject = null;
-        }
-        if (this.calPreviewVideo) {
-            this.calPreviewVideo.srcObject = null;
-        }
+        if (this.videoElement) this.videoElement.srcObject = null;
+        if (this.calPreviewVideo) this.calPreviewVideo.srcObject = null;
 
-        // 4. Clear overlay canvas
         if (this.ctx && this.canvasElement) {
             this.ctx.clearRect(0, 0, this.canvasElement.width, this.canvasElement.height);
         }
 
-        // 5. Reset detection status
         if (this.headTracker) {
             this.headTracker.faceDetected = false;
+            this.headTracker.isPlayer1Locked = false;
         }
         if (this.bodyTracker) {
             this.bodyTracker.bodyDetected = false;
+            this.bodyTracker.isBodyLocked = false;
         }
     }
 
@@ -207,6 +315,8 @@ export class InputManager {
     }
 
     fallbackToKeyboard() {
+        console.log('[InputManager] Fallback to Keyboard Mode engaged.');
+        this.isKeyboardMode = true;
         this.cameraAllowed = false;
         this.cameraError = 'FallbackKeyboard';
         this.stopCamera();
@@ -219,8 +329,11 @@ export class InputManager {
         return await this.startCamera();
     }
 
+    // ============================================================
+    // MEDIAPIPE MODELS INITIALIZATION
+    // ============================================================
     async initMediaPipeModels() {
-        // 1. Initialize Pose model for Body mode and fallback
+        // 1. Initialize Pose model for Body mode
         if (typeof window.Pose !== 'undefined' && !this.poseModel) {
             try {
                 this.poseModel = new window.Pose({
@@ -238,15 +351,15 @@ export class InputManager {
             }
         }
 
-        // 2. Initialize FaceMesh for Head mode
+        // 2. Initialize FaceMesh configured for MULTI-FACE crowd arbitration (maxNumFaces: 4)
         if (typeof window.FaceMesh !== 'undefined' && !this.faceMeshModel) {
             try {
                 this.faceMeshModel = new window.FaceMesh({
                     locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
                 });
                 this.faceMeshModel.setOptions({
-                    maxNumFaces: 1,
-                    refineLandmarks: false,
+                    maxNumFaces: 4, // CORE REQUIREMENT: detect up to 4 faces to lock onto Player 1 and reject crowd!
+                    refineLandmarks: true,
                     minDetectionConfidence: 0.5,
                     minTrackingConfidence: 0.5
                 });
@@ -257,6 +370,9 @@ export class InputManager {
         }
     }
 
+    // ============================================================
+    // SEPARATED INFERENCE PROCESSING LOOP
+    // ============================================================
     startProcessingLoop() {
         if (this.isProcessingLoopRunning) return;
         this.isProcessingLoopRunning = true;
@@ -264,7 +380,7 @@ export class InputManager {
         let isSending = false;
 
         const processFrame = async () => {
-            if (!this.isCameraRunning) {
+            if (this.cameraState !== CameraStates.READY || !this.mediaStream) {
                 this.isProcessingLoopRunning = false;
                 return;
             }
@@ -275,7 +391,7 @@ export class InputManager {
                 !isSending &&
                 this.videoElement.videoWidth > 0) {
 
-                // Match canvas dimensions to video aspect
+                // Sync overlay canvas dimensions to video
                 if (this.canvasElement &&
                     (this.canvasElement.width !== this.videoElement.videoWidth ||
                      this.canvasElement.height !== this.videoElement.videoHeight)) {
@@ -283,27 +399,42 @@ export class InputManager {
                     this.canvasElement.height = this.videoElement.videoHeight;
                 }
 
+                // Prepare downscaled inference frame to maintain 30+ FPS tracking
+                // without sacrificing native display quality
+                const vw = this.videoElement.videoWidth;
+                const vh = this.videoElement.videoHeight;
+                const aspect = vw / vh;
+                const targetW = 640;
+                const targetH = Math.round(targetW / aspect);
+
+                if (this.inferenceCanvas.width !== targetW || this.inferenceCanvas.height !== targetH) {
+                    this.inferenceCanvas.width = targetW;
+                    this.inferenceCanvas.height = targetH;
+                }
+
+                this.inferenceCtx.drawImage(this.videoElement, 0, 0, targetW, targetH);
+
                 isSending = true;
                 try {
                     if (this.mode === 'head') {
                         if (this.faceMeshModel) {
-                            await this.faceMeshModel.send({ image: this.videoElement });
+                            await this.faceMeshModel.send({ image: this.inferenceCanvas });
                         } else if (this.poseModel) {
-                            await this.poseModel.send({ image: this.videoElement });
+                            await this.poseModel.send({ image: this.inferenceCanvas });
                         }
                     } else {
                         if (this.poseModel) {
-                            await this.poseModel.send({ image: this.videoElement });
+                            await this.poseModel.send({ image: this.inferenceCanvas });
                         }
                     }
                 } catch (err) {
-                    // Frame drop
+                    // Frame drop tolerance
                 } finally {
                     isSending = false;
                 }
             }
 
-            if (this.isCameraRunning) {
+            if (this.cameraState === CameraStates.READY) {
                 this.frameLoopId = requestAnimationFrame(processFrame);
             } else {
                 this.isProcessingLoopRunning = false;
@@ -316,32 +447,26 @@ export class InputManager {
     onFaceResults(results) {
         if (this.mode !== 'head') return;
         const now = performance.now();
-        const deltaSec = Math.max(0.005, Math.min(0.1, (now - (this.lastFaceProcessTime || now)) / 1000));
-        this.lastFaceProcessTime = now;
+        const deltaSec = Math.max(0.005, Math.min(0.1, (now - (this.lastProcessTime || now)) / 1000));
+        this.lastProcessTime = now;
 
-        const landmarks = results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0
-            ? results.multiFaceLandmarks[0]
-            : null;
-
-        // FACE-ONLY
-        this.headTracker.processLandmarks(landmarks, false, deltaSec);
+        // Process all detected faces through the Multi-Face Crowd Arbitration system
+        this.headTracker.processMultiFace(results.multiFaceLandmarks, deltaSec);
         this.renderOverlay();
     }
 
     onPoseResults(results) {
         const now = performance.now();
-        const deltaSec = Math.max(0.005, Math.min(0.1, (now - (this.lastFaceProcessTime || now)) / 1000));
-        this.lastFaceProcessTime = now;
+        const deltaSec = Math.max(0.005, Math.min(0.1, (now - (this.lastProcessTime || now)) / 1000));
+        this.lastProcessTime = now;
 
         if (this.mode === 'head') {
-            // ONLY if FaceMesh is unavailable: extract face landmarks (0 to 10) ONLY
             if (!this.faceMeshModel) {
                 const faceOnly = results.poseLandmarks ? results.poseLandmarks.slice(0, 11) : null;
                 this.headTracker.processLandmarks(faceOnly, true, deltaSec);
                 this.renderOverlay();
             }
         } else {
-            // Body Mode
             this.bodyTracker.processLandmarks(results.poseLandmarks);
             this.renderOverlay();
         }
@@ -360,7 +485,6 @@ export class InputManager {
     }
 
     resetPlayerSession() {
-        // Complete state flush for 2-Player turn switching or new matches
         this.headTracker.resetCalibration();
         this.bodyTracker.resetCalibration();
         this.keyboardTracker.resetKickTrigger();
@@ -368,11 +492,7 @@ export class InputManager {
     }
 
     startCalibration() {
-        if (!this.cameraAllowed) {
-            // Camera unavailable or denied: user will use fallback buttons
-            return;
-        }
-
+        if (this.cameraState !== CameraStates.READY) return;
         if (this.mode === 'head') {
             this.headTracker.startCalibration();
         } else {
@@ -397,27 +517,79 @@ export class InputManager {
     }
 
     isCalibrating() {
-        if (!this.cameraAllowed) return false;
+        if (this.isKeyboardMode) return false;
+        if (this.cameraState !== CameraStates.READY) return false;
         if (this.mode === 'head') {
-            return this.headTracker.isCalibrating;
+            return this.headTracker.isCalibrating || this.headTracker.enrollmentState === 'CAPTURING_ID';
         } else {
             return this.bodyTracker.isCalibrating;
         }
     }
 
+    // STRICT STATE MACHINE: Calibration complete ONLY if camera is READY and actual tracker completed
     isCalibrationComplete() {
-        if (!this.cameraAllowed) return true;
+        if (this.isKeyboardMode) return true;
+        if (this.cameraState !== CameraStates.READY) return false;
+
         if (this.mode === 'head') {
-            return this.headTracker.calibrationComplete;
+            return this.headTracker.calibrationComplete && this.headTracker.isPlayer1Locked;
         } else {
-            return this.bodyTracker.calibrationComplete;
+            return this.bodyTracker.calibrationComplete && this.bodyTracker.isBodyLocked;
         }
     }
 
-    getCalibrationProgress() {
-        if (!this.cameraAllowed) {
-            return { percent: 100, quality: 5, complete: true };
+    // STRICT SINGLE SOURCE OF TRUTH: Match can ONLY start when all prerequisites are physically satisfied
+    canStartMatch() {
+        if (this.isKeyboardMode) return true;
+        if (this.cameraState !== CameraStates.READY) return false;
+
+        if (this.mode === 'head') {
+            return (
+                this.headTracker.faceDetected &&
+                this.headTracker.isPlayer1Locked &&
+                this.headTracker.calibrationComplete
+            );
+        } else {
+            return (
+                this.bodyTracker.bodyDetected &&
+                this.bodyTracker.isBodyLocked &&
+                this.bodyTracker.calibrationComplete
+            );
         }
+    }
+
+    // STRICT PROGRESS: Zero fake progress when camera is not ready
+    getCalibrationProgress() {
+        if (this.isKeyboardMode) {
+            return {
+                percent: 100,
+                quality: 5,
+                complete: true,
+                stage: 'LOCKED',
+                stageLabel: 'KEYBOARD CONTROLS (ACTIVE)',
+                samples: 24,
+                required: 24
+            };
+        }
+
+        if (this.cameraState !== CameraStates.READY) {
+            let label = 'CAMERA NOT INITIALIZED';
+            if (this.cameraState === CameraStates.REQUESTING) label = 'REQUESTING CAMERA PERMISSION...';
+            if (this.cameraState === CameraStates.DENIED) label = 'CAMERA ACCESS DENIED';
+            if (this.cameraState === CameraStates.UNAVAILABLE) label = 'CAMERA UNAVAILABLE';
+            if (this.cameraState === CameraStates.LOST) label = 'CAMERA STREAM LOST';
+
+            return {
+                percent: 0,
+                quality: 0,
+                complete: false,
+                stage: 'ERROR',
+                stageLabel: label,
+                samples: 0,
+                required: 24
+            };
+        }
+
         if (this.mode === 'head') {
             return this.headTracker.getCalibrationProgress();
         } else {
@@ -433,19 +605,18 @@ export class InputManager {
         this.keyboardTracker.update(delta);
     }
 
-    // Normalized Game Inputs
     getAim() {
         if (Math.abs(this.keyboardTracker.normalizedAim) > 0.05) {
             return this.keyboardTracker.normalizedAim;
         }
         if (this.mode === 'head') {
-            // If kick was triggered or charging with upward nod in progress,
-            // use lockedShotAim to guarantee no aim reticle jumping during the nod
-            if (this.headTracker.lockedShotAim !== null &&
-                (this.headTracker.kickTriggered || this.headTracker.isCharging)) {
-                return this.headTracker.lockedShotAim;
+            if (this.headTracker.kickTriggered || this.headTracker.isCharging) {
+                return this.headTracker.lockedShotAim !== null ? this.headTracker.lockedShotAim : this.headTracker.normalizedAim;
             }
             return this.headTracker.normalizedAim;
+        }
+        if (this.bodyTracker.kickTriggered || this.bodyTracker.isCharging) {
+            return this.bodyTracker.lockedShotAim !== null ? this.bodyTracker.lockedShotAim : this.bodyTracker.normalizedAim;
         }
         return this.bodyTracker.normalizedAim;
     }
@@ -453,6 +624,9 @@ export class InputManager {
     getLockedKickAim(defaultAim) {
         if (this.mode === 'head' && this.headTracker.lockedShotAim !== null) {
             return this.headTracker.lockedShotAim;
+        }
+        if (this.mode === 'body' && this.bodyTracker.lockedShotAim !== null) {
+            return this.bodyTracker.lockedShotAim;
         }
         return defaultAim;
     }
@@ -479,19 +653,20 @@ export class InputManager {
     }
 
     isTracking() {
-        if (!this.isCameraActive() || !this.cameraAllowed) return false;
-        return this.mode === 'head' ? this.headTracker.faceDetected : this.bodyTracker.bodyDetected;
+        if (this.isKeyboardMode) return true;
+        if (!this.isCameraActive()) return false;
+        return this.mode === 'head'
+            ? (this.headTracker.faceDetected && this.headTracker.isPlayer1Locked)
+            : (this.bodyTracker.bodyDetected && this.bodyTracker.isBodyLocked);
     }
 
     getPositionStatus() {
-        if (this.cameraError === 'FallbackKeyboard') {
-            return 'KEYBOARD';
-        }
-        if (!this.isCameraActive()) {
-            if (this.cameraError === 'NotAllowedError') return 'CAMERA_DENIED';
-            if (this.cameraError) return 'CAMERA_UNAVAILABLE';
-            return 'CAMERA_OFF';
-        }
+        if (this.isKeyboardMode) return 'KEYBOARD';
+        if (this.cameraState === CameraStates.DENIED) return 'CAMERA_DENIED';
+        if (this.cameraState === CameraStates.UNAVAILABLE) return 'CAMERA_UNAVAILABLE';
+        if (this.cameraState === CameraStates.LOST) return 'CAMERA_LOST';
+        if (this.cameraState !== CameraStates.READY) return 'CAMERA_OFF';
+
         if (this.mode === 'head') {
             return this.headTracker.positionStatus || 'NO_FACE';
         }
@@ -499,16 +674,29 @@ export class InputManager {
     }
 
     getStatusText() {
-        if (!this.isCameraActive()) {
-            if (this.cameraError === 'FallbackKeyboard') {
-                return 'KEYBOARD CONTROLS (CAM OFF)';
-            }
-            return 'CAM: OFF';
-        }
+        if (this.isKeyboardMode) return 'KEYBOARD CONTROLS (CAM OFF)';
+
+        if (this.cameraState === CameraStates.REQUESTING) return 'REQUESTING CAMERA ACCESS...';
+        if (this.cameraState === CameraStates.DENIED) return 'CAMERA PERMISSION DENIED';
+        if (this.cameraState === CameraStates.UNAVAILABLE) return 'CAMERA UNAVAILABLE';
+        if (this.cameraState === CameraStates.LOST) return 'CAMERA STREAM LOST';
+        if (this.cameraState !== CameraStates.READY) return 'CAMERA OFF';
+
         if (this.isCalibrating()) {
-            return 'CALIBRATING NEUTRAL...';
+            const prog = this.getCalibrationProgress();
+            return prog.stageLabel || 'CALIBRATING...';
         }
+
         if (this.mode === 'head') {
+            if (this.headTracker.searchingForPlayer) {
+                return 'SEARCHING FOR PLAYER 1...';
+            }
+            if (this.headTracker.isPlayer1Locked) {
+                if (this.headTracker.ignoredFaceCount > 0) {
+                    return `P1 LOCKED • ${this.headTracker.ignoredFaceCount} CROWD FACE IGNORED`;
+                }
+                return 'PLAYER 1 ● TRACKED';
+            }
             switch (this.headTracker.positionStatus) {
                 case 'MOVE_CLOSER': return 'MOVE CLOSER';
                 case 'MOVE_BACK': return 'MOVE BACK';
@@ -516,22 +704,22 @@ export class InputManager {
                 case 'MOVE_LEFT': return 'MOVE LEFT';
                 case 'MOVE_DOWN': return 'MOVE DOWN';
                 case 'MOVE_UP': return 'MOVE UP';
-                case 'LOOK_STRAIGHT': return 'LOOK STRAIGHT — HOLD STILL';
-                case 'FACE_DETECTED': return 'FACE DETECTED ✓';
-                case 'NO_FACE':
-                default:
-                    return 'FACE NOT DETECTED';
+                case 'STEADY_HEAD': return 'HOLD STILL';
+                case 'NO_PLAYER': return 'PLAYER 1 NOT FOUND';
+                default: return 'SEARCHING...';
             }
         } else {
+            if (this.bodyTracker.isBodyLocked) {
+                return 'BODY ● TRACKED';
+            }
             switch (this.bodyTracker.positionStatus) {
                 case 'MOVE_BACK': return 'MOVE BACK';
                 case 'MOVE_CLOSER': return 'MOVE CLOSER';
-                case 'MOVE_RIGHT': return 'MOVE RIGHT';
-                case 'MOVE_LEFT': return 'MOVE LEFT';
-                case 'BODY_DETECTED': return 'BODY DETECTED ✓';
-                case 'NO_BODY':
-                default:
-                    return 'BODY NOT DETECTED';
+                case 'MOVE_LEFT': return 'STEP LEFT';
+                case 'MOVE_RIGHT': return 'STEP RIGHT';
+                case 'FULL_BODY_REQUIRED': return 'FULL BODY REQUIRED';
+                case 'BODY_FRAMED': return 'BODY FRAMED ✓';
+                default: return 'BODY NOT DETECTED';
             }
         }
     }

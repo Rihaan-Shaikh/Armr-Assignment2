@@ -1,6 +1,7 @@
 // Master Game Manager for TILT KICK
 // Implements full state machine for Solo, Practice, and 2-Player Pass-and-Play modes,
-// pause system with timer freezing, authoritative locked-aim shot execution, and goalkeeper reaction sequencing.
+// pause system with timer freezing, authoritative locked-aim shot execution,
+// continuous swept goalkeeper collision detection, and stadium fanfare sequencing.
 
 import { soundEngine } from '../audio/SoundEngine.js';
 import { ShotEngine } from './ShotEngine.js';
@@ -20,7 +21,7 @@ export class GameManager {
         this.trackingMode = 'head'; // 'head' | 'body'
 
         // State Machine
-        // 'BOOT' | 'MAIN_MENU' | 'CALIBRATION' | 'COUNTDOWN' | 'AIMING' | 'CHARGING' | 'SHOT_IN_FLIGHT' | 'RESULT_BANNER' | 'PAUSED' | 'PLAYER_SWITCH' | 'GAME_OVER'
+        // 'BOOT' | 'MAIN_MENU' | 'CALIBRATION' | 'CALIBRATED_WAIT' | 'COUNTDOWN' | 'AIMING' | 'CHARGING' | 'SHOT_IN_FLIGHT' | 'RESULT_BANNER' | 'PAUSED' | 'PLAYER_SWITCH' | 'GAME_OVER'
         this.state = 'BOOT';
         this.prePauseState = 'AIMING';
 
@@ -59,6 +60,7 @@ export class GameManager {
         this.activeShotResult = null;
         this.shotFlightTimer = 0;
         this.lastSoundChargeTime = 0;
+        this.collisionChecked = false;
 
         // Sequence Timers
         this.countdownValue = 3;
@@ -136,12 +138,17 @@ export class GameManager {
     }
 
     onCalibrationComplete() {
+        if (!this.inputManager.isCalibrationComplete()) return;
         this.state = 'CALIBRATED_WAIT';
         soundEngine.playCountdown(true);
         this.uiManager.showCalibrationSuccess();
     }
 
     confirmCalibrationStart() {
+        if (!this.inputManager.canStartMatch()) {
+            console.warn('[GameManager] Match cannot start: Camera and enrollment requirements not verified.');
+            return;
+        }
         if (this.state !== 'CALIBRATED_WAIT' && this.state !== 'CALIBRATION') return;
         this.uiManager.hideCalibrationScreen();
         this.startCountdown();
@@ -163,6 +170,7 @@ export class GameManager {
         this.inputManager.resetKickTrigger();
         this.currentAim = 0;
         this.currentPower = 0;
+        this.collisionChecked = false;
 
         if (this.gameMode === 'practice') {
             this.uiManager.showPracticeHUD();
@@ -180,11 +188,13 @@ export class GameManager {
         this.state = 'SHOT_IN_FLIGHT';
         this.inputManager.lockInput(true); // Lock input during ball flight
         this.shotsTaken++;
+        this.collisionChecked = false;
 
-        // CRITICAL REQUIREMENT 6: Use lockedShotAim if available so nod doesn't move reticle!
+        // Authoritative locked aim (guarantees nod motion does not pull reticle off-target)
         const authoritativeAim = this.inputManager.getLockedKickAim(aim);
         this.currentAim = authoritativeAim;
-        this.currentPower = Math.max(0.2, power);
+        // Decoupled kick guarantee: minimum 30% shot power even on immediate center nod without charging
+        this.currentPower = Math.max(0.30, power);
 
         if (this.gameMode === '2player') {
             if (this.currentPlayer === 1) this.player1Shots++;
@@ -196,7 +206,7 @@ export class GameManager {
         const evaluation = this.shotEngine.evaluateShot(target.x, target.y, target.effectivePower);
         this.activeShotResult = evaluation;
 
-        // Sound & HUD
+        // Audio & Visual Feedback
         soundEngine.playKick(this.currentPower);
         this.uiManager.setStatusText('KICK! — BALL IN FLIGHT');
         this.uiManager.showShotQuality(evaluation.quality);
@@ -252,8 +262,10 @@ export class GameManager {
                 if (this.currentPlayer === 1) this.player1Results.push('SAVED');
                 else this.player2Results.push('SAVED');
             }
-            soundEngine.playSave();
-            this.ball.deflect();
+            if (!this.collisionChecked) {
+                soundEngine.playSave();
+                this.ball.deflect();
+            }
         } else {
             // MISS
             this.misses++;
@@ -312,7 +324,7 @@ export class GameManager {
                     this.uiManager.showPlayerSwitchModal(2, this.player1Score, () => {
                         this.inputManager.resetPlayerSession();
                         this.inputManager.pauseProcessing(false);
-                        this.beginCalibration(); // Fresh calibration for Player 2 reusing single active stream
+                        this.beginCalibration(); // Fresh calibration for Player 2
                     });
                 } else {
                     // Player 2 full time: Game over
@@ -341,11 +353,10 @@ export class GameManager {
         this.inputManager.pauseProcessing(true);
         this.uiManager.showPauseModal();
 
-        // Safety timeout: If user leaves match paused for > 60s, stop camera hardware stream
+        // Privacy auto-stop if paused > 60s
         if (this.pauseSafetyTimer) clearTimeout(this.pauseSafetyTimer);
         this.pauseSafetyTimer = setTimeout(() => {
             if (this.state === 'PAUSED') {
-                console.log('[GameManager] Pause inactive for 60s. Auto-stopping camera for privacy.');
                 this.inputManager.stopCamera();
             }
         }, 60000);
@@ -359,7 +370,6 @@ export class GameManager {
         this.uiManager.hidePauseModal();
         this.state = this.prePauseState === 'PAUSED' ? 'AIMING' : this.prePauseState;
 
-        // If camera was stopped during prolonged pause, re-acquire seamlessly
         if (!this.inputManager.isCameraActive() && this.inputManager.cameraAllowed) {
             await this.inputManager.startCamera();
         }
@@ -377,7 +387,6 @@ export class GameManager {
         this.beginCalibration();
     }
 
-    // Practice Mode Utilities
     resetPracticeShot() {
         if (this.gameMode === 'practice') {
             this.beginAiming();
@@ -397,12 +406,11 @@ export class GameManager {
         }
         this.state = 'GAME_OVER';
         this.inputManager.lockInput(true);
-        this.inputManager.stopCamera(); // CAMERA = OFF immediately upon match end / Full Time
+        this.inputManager.stopCamera(); // CAMERA = OFF immediately upon match end
         soundEngine.playWhistle();
 
         if (this.gameMode === 'solo') {
             const accuracy = this.shotsTaken > 0 ? Math.round((this.goals / this.shotsTaken) * 100) : 0;
-            // Record Career Stats
             settingsManager.recordMatchResult({
                 score: this.score,
                 goals: this.goals,
@@ -447,7 +455,6 @@ export class GameManager {
     }
 
     update(delta = 1 / 60) {
-        // Paused state: halt updates
         if (this.state === 'PAUSED') return;
 
         // 1. Update Subsystems
@@ -484,7 +491,6 @@ export class GameManager {
                 }
             }
         } else if (this.state === 'AIMING' || this.state === 'CHARGING') {
-            // Match timer countdown (Solo & 2-Player)
             if (this.gameMode === 'solo' || this.gameMode === '2player') {
                 this.timeRemaining = Math.max(0, this.timeRemaining - delta);
                 if (this.gameMode === 'solo') {
@@ -502,13 +508,12 @@ export class GameManager {
                 }
             }
 
-            // Normalized input
             const aim = this.inputManager.getAim();
             const power = this.inputManager.getPower();
             this.currentAim = aim;
             this.currentPower = power;
 
-            // Contextual HUD Status Feedback
+            // Contextual HUD Status
             if (this.gameMode !== 'practice') {
                 if (power <= 0.05) {
                     this.uiManager.setStatusText(this.trackingMode === 'head' ? 'TILT TO AIM' : 'LEAN TO AIM');
@@ -517,31 +522,40 @@ export class GameManager {
                 } else if (power < 0.75) {
                     this.uiManager.setStatusText('TARGET LOCKED — NOD ↑ TO KICK');
                 } else {
-                    this.uiManager.setStatusText('PERFECT RANGE — NOD ↑ TO KICK');
+                    this.uiManager.setStatusText('MAX POWER — NOD ↑ TO KICK');
                 }
             }
 
-            // Keeper anticipation when player is charging power
-            if (power > 0.25) {
+            // Goalkeeper anticipates when power builds
+            if (power > 0.22) {
                 this.goalkeeper.anticipate();
             }
 
-            // Power audio hum
             if (power > 0.1 && performance.now() - this.lastSoundChargeTime > 120) {
                 soundEngine.playCharge(power);
                 this.lastSoundChargeTime = performance.now();
             }
 
-            // Update UI Reticle & Power Bar
             this.uiManager.updateAimReticle(aim, power);
             this.uiManager.updatePowerMeter(power);
 
-            // Kick trigger check
             if (this.inputManager.isKickTriggered()) {
                 this.executeKick(aim, power);
                 this.inputManager.resetKickTrigger();
             }
         } else if (this.state === 'SHOT_IN_FLIGHT') {
+            // CONTINUOUS SWEPT TRAJECTORY KEEPER INTERCEPT CHECK (Phase 13)
+            if (!this.collisionChecked && this.activeShotResult) {
+                const collision = this.goalkeeper.checkBallCollision(this.ball.position, this.ball.radius);
+                if (collision && collision.hit) {
+                    this.collisionChecked = true;
+                    if (this.activeShotResult.willSave) {
+                        this.ball.deflect();
+                        soundEngine.playSave();
+                    }
+                }
+            }
+
             this.shotFlightTimer -= delta;
             if (this.shotFlightTimer <= 0) {
                 this.resolveShotOutcome();

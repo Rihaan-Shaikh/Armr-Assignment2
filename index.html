@@ -63,14 +63,20 @@
 
     <!-- Tracking Debug Overlay (Toggle with ` backtick) -->
     <div id="debug-overlay" class="debug-overlay" style="display: none;">
-        <div class="debug-title">TRACKING DEBUG (` to close)</div>
-        <div class="debug-row"><span>Status:</span><strong id="dbg-status">OK</strong></div>
+        <div class="debug-title">TRACKING TELEMETRY (` to close)</div>
+        <div class="debug-row"><span>Player:</span><strong id="dbg-player-id">PLAYER 1</strong></div>
+        <div class="debug-row"><span>Faces:</span><strong id="dbg-face-count">1 (0 IGNORED)</strong></div>
+        <div class="debug-row"><span>ID Match:</span><strong id="dbg-match-score">100%</strong></div>
         <div class="debug-row"><span>Raw Roll:</span><strong id="dbg-raw">0.0°</strong></div>
         <div class="debug-row"><span>Smoothed:</span><strong id="dbg-smoothed">0.0°</strong></div>
         <div class="debug-row"><span>Neutral:</span><strong id="dbg-neutral">0.0°</strong></div>
-        <div class="debug-row"><span>Dead Zone:</span><strong id="dbg-deadzone">7.0°</strong></div>
+        <div class="debug-row"><span>Pitch:</span><strong id="dbg-pitch">0.0</strong></div>
+        <div class="debug-row"><span>Pitch Vel:</span><strong id="dbg-pitchvel">0.0</strong></div>
         <div class="debug-row"><span>Aim:</span><strong id="dbg-aim">0.00</strong></div>
+        <div class="debug-row"><span>Locked Aim:</span><strong id="dbg-locked-aim">0.00</strong></div>
         <div class="debug-row"><span>Power:</span><strong id="dbg-power">0%</strong></div>
+        <div class="debug-row"><span>Status:</span><strong id="dbg-status">OK</strong></div>
+        <div class="debug-row"><span>FPS:</span><strong id="dbg-fps">60 FPS</strong></div>
     </div>
 
     <!-- ==================== UI SCREENS ==================== -->
@@ -464,8 +470,26 @@
     <div id="calibration-overlay" class="modal-overlay" style="display: none;">
         <div class="calibration-box guided-box">
             <div class="setup-header">
-                <h3 id="cal-title" class="cal-title">SET UP YOUR CAMERA</h3>
-                <p id="cal-desc" class="cal-desc">Position your face inside the guide.</p>
+                <h3 id="cal-title" class="cal-title">PLAYER 1 SETUP</h3>
+                <p id="cal-desc" class="cal-desc">Position your face inside the guide to begin.</p>
+            </div>
+
+            <!-- Authentic 3-Step Enrollment Indicator -->
+            <div class="cal-step-indicator" id="cal-step-indicator">
+                <div class="step-item active" id="step-ind-1">
+                    <span class="step-number">1</span>
+                    <span class="step-name">IDENTITY</span>
+                </div>
+                <div class="step-line" id="step-line-1"></div>
+                <div class="step-item" id="step-ind-2">
+                    <span class="step-number">2</span>
+                    <span class="step-name">CALIBRATION</span>
+                </div>
+                <div class="step-line" id="step-line-2"></div>
+                <div class="step-item" id="step-ind-3">
+                    <span class="step-number">3</span>
+                    <span class="step-name">READY</span>
+                </div>
             </div>
 
             <!-- Polished Live Camera Preview Area -->
@@ -506,11 +530,12 @@
                 <!-- Camera Access Needed / Unavailable Fallback UI -->
                 <div id="cal-camera-fallback" class="cal-camera-fallback" style="display: none;">
                     <div class="fallback-icon">📷</div>
-                    <h4 id="cal-fallback-title">CAMERA ACCESS NEEDED</h4>
-                    <p id="cal-fallback-desc">We need camera access to track your head movement.</p>
+                    <h4 id="cal-fallback-title">CAMERA ACCESS REQUIRED</h4>
+                    <p id="cal-fallback-desc">Allow camera access to continue with head tilt controls.</p>
                     <div class="fallback-buttons">
                         <button id="btn-cal-retry" class="btn btn-primary btn-sm">TRY AGAIN</button>
                         <button id="btn-cal-fallback-key" class="btn btn-outline btn-sm">USE KEYBOARD</button>
+                        <button id="btn-cal-fallback-back" class="btn btn-back btn-sm">‹ BACK</button>
                     </div>
                 </div>
             </div>
@@ -799,6 +824,21 @@
                         <input type="checkbox" id="setting-sound-toggle" checked>
                         <span class="slider"></span>
                     </label>
+                </div>
+
+                <!-- APPEARANCE SECTION -->
+                <div class="settings-section-title">APPEARANCE</div>
+
+                <div class="setting-item">
+                    <div class="setting-info">
+                        <span class="setting-title">Stadium Theme</span>
+                        <span class="setting-desc" id="setting-theme-desc">AUTO (Based on device local time)</span>
+                    </div>
+                    <div class="segmented-control" id="seg-theme">
+                        <button class="seg-btn active" data-val="auto">AUTO</button>
+                        <button class="seg-btn" data-val="day">DAY</button>
+                        <button class="seg-btn" data-val="night">NIGHT</button>
+                    </div>
                 </div>
 
                 <!-- CAMERA SECTION -->

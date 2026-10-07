@@ -157,17 +157,12 @@ class TiltKickApp {
             this.gameManager.togglePause();
         };
 
-        // Space / Enter keyboard shortcut during calibration
+        // Space / Enter keyboard shortcut during calibration wait
         window.addEventListener('keydown', (e) => {
             if (e.code === 'Space' || e.code === 'Enter') {
                 if (this.gameManager.state === 'CALIBRATED_WAIT') {
                     e.preventDefault();
                     this.gameManager.confirmCalibrationStart();
-                } else if (this.gameManager.state === 'CALIBRATION') {
-                    // Space allows quick completion of calibration if desired
-                    if (e.code === 'Space') {
-                        this.inputManager.forceCalibrationComplete();
-                    }
                 }
             }
         });

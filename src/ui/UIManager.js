@@ -1,6 +1,6 @@
 // Complete UI Controller for TILT KICK
-// Manages all visual menus, HUD elements, targeting reticle, animations, advanced settings,
-// guided camera setup, practice toolbar, match length selector, career stats, and confirmation modals.
+// Manages visual menus, athletic broadcast HUD, targeting reticle, 4-tier power meter,
+// Player Enrollment & Head Pose Calibration sequence, result fanfare, and dev telemetry.
 
 import { soundEngine } from '../audio/SoundEngine.js';
 import { settingsManager } from '../utils/SettingsManager.js';
@@ -55,7 +55,7 @@ export class UIManager {
             shotQualityBadge: document.getElementById('shot-quality-badge'),
             shotQualityText: document.getElementById('shot-quality-text'),
 
-            // Guided Camera Setup
+            // Guided Camera Setup & Enrollment
             faceGuideFrame: document.getElementById('face-guide-frame'),
             bodyGuideFrame: document.getElementById('body-guide-frame'),
             calWebcamPreview: document.getElementById('cal-webcam-preview'),
@@ -109,7 +109,12 @@ export class UIManager {
         this.pendingGameMode = 'solo';
         this.selectedMatchSec = settingsManager.get('matchLengthSec') || 180;
         this.calibrationStartTime = 0;
-        this.calibrationDuration = 2200;
+        this.lastMatchShareData = null;
+
+        // FPS tracking for debug
+        this.frameCount = 0;
+        this.lastFpsUpdate = performance.now();
+        this.currentFps = 60;
 
         this.initEventListeners();
         this.initSettingsUI();
@@ -190,82 +195,45 @@ export class UIManager {
             this.showScreen('trackingModeSelect');
         });
 
-        // How to Play Screen
-        const btnHowToHead = document.getElementById('tab-how-to-head');
-        const btnHowToBody = document.getElementById('tab-how-to-body');
-        const contentHead = document.getElementById('how-to-content-head');
-        const contentBody = document.getElementById('how-to-content-body');
-
-        btnHowToHead?.addEventListener('click', () => {
+        // Match Length Selection
+        document.getElementById('btn-start-match')?.addEventListener('click', () => {
             soundEngine.playClick();
-            btnHowToHead.classList.add('active');
-            btnHowToBody?.classList.remove('active');
-            if (contentHead) contentHead.style.display = 'grid';
-            if (contentBody) contentBody.style.display = 'none';
+            if (this.onMatchLengthConfirmed) this.onMatchLengthConfirmed(this.selectedMatchSec);
+            if (this.onGameModeSelected) this.onGameModeSelected(this.pendingGameMode);
         });
 
-        btnHowToBody?.addEventListener('click', () => {
+        document.getElementById('btn-back-match-length')?.addEventListener('click', () => {
             soundEngine.playClick();
-            btnHowToBody.classList.add('active');
-            btnHowToHead?.classList.remove('active');
-            if (contentHead) contentHead.style.display = 'none';
-            if (contentBody) contentBody.style.display = 'grid';
+            this.showScreen('gameModeSelect');
         });
 
-        document.getElementById('btn-close-how-to')?.addEventListener('click', () => {
+        // How To Play tabs & back
+        document.getElementById('tab-how-to-head')?.addEventListener('click', () => {
+            soundEngine.playClick();
+            document.getElementById('tab-how-to-head')?.classList.add('active');
+            document.getElementById('tab-how-to-body')?.classList.remove('active');
+            const h = document.getElementById('how-to-content-head');
+            const b = document.getElementById('how-to-content-body');
+            if (h) h.style.display = 'grid';
+            if (b) b.style.display = 'none';
+        });
+
+        document.getElementById('tab-how-to-body')?.addEventListener('click', () => {
+            soundEngine.playClick();
+            document.getElementById('tab-how-to-body')?.classList.add('active');
+            document.getElementById('tab-how-to-head')?.classList.remove('active');
+            const h = document.getElementById('how-to-content-head');
+            const b = document.getElementById('how-to-content-body');
+            if (h) h.style.display = 'none';
+            if (b) b.style.display = 'grid';
+        });
+
+        document.getElementById('btn-how-to-back')?.addEventListener('click', () => {
             soundEngine.playClick();
             this.showScreen('mainMenu');
         });
 
-        // Pause Menu Handlers with Confirmation Dialogs
-        this.dom.btnPause?.addEventListener('click', () => {
-            soundEngine.playClick();
-            this.togglePauseModal();
-        });
-
-        document.getElementById('btn-pause-resume')?.addEventListener('click', () => {
-            soundEngine.playClick();
-            if (this.onResumeClicked) this.onResumeClicked();
-        });
-
-        document.getElementById('btn-pause-settings')?.addEventListener('click', () => {
-            soundEngine.playClick();
-            this.showModal('settings');
-        });
-
-        document.getElementById('btn-pause-recalibrate')?.addEventListener('click', () => {
-            soundEngine.playClick();
-            if (this.onRecalibrateClicked) this.onRecalibrateClicked();
-        });
-
-        document.getElementById('btn-pause-restart')?.addEventListener('click', () => {
-            soundEngine.playClick();
-            this.showConfirmModal({
-                title: 'RESTART MATCH?',
-                message: 'Your current match score and streak will be reset.',
-                confirmText: 'RESTART',
-                onConfirm: () => {
-                    this.hideModal('pauseModal');
-                    if (this.onRestartClicked) this.onRestartClicked();
-                }
-            });
-        });
-
-        document.getElementById('btn-pause-menu')?.addEventListener('click', () => {
-            soundEngine.playClick();
-            this.showConfirmModal({
-                title: 'LEAVE MATCH?',
-                message: 'Are you sure you want to return to the main menu?',
-                confirmText: 'LEAVE',
-                onConfirm: () => {
-                    this.hideModal('pauseModal');
-                    this.showScreen('mainMenu');
-                    if (this.onMainMenuClicked) this.onMainMenuClicked();
-                }
-            });
-        });
-
-        // Guided Calibration Buttons
+        // Calibration Action Buttons
         document.getElementById('btn-cal-start-match')?.addEventListener('click', () => {
             soundEngine.playClick();
             if (this.onCalStartMatchClicked) this.onCalStartMatchClicked();
@@ -283,13 +251,7 @@ export class UIManager {
 
         document.getElementById('btn-cal-back')?.addEventListener('click', () => {
             soundEngine.playClick();
-            this.hideCalibrationScreen();
-            if (this.onCalBackClicked) {
-                this.onCalBackClicked();
-            } else {
-                this.showScreen('mainMenu');
-                if (this.onMainMenuClicked) this.onMainMenuClicked();
-            }
+            if (this.onCalBackClicked) this.onCalBackClicked();
         });
 
         document.getElementById('btn-cal-retry')?.addEventListener('click', () => {
@@ -302,48 +264,58 @@ export class UIManager {
             if (this.onCalFallbackKeyClicked) this.onCalFallbackKeyClicked();
         });
 
-        // Practice Mode Toolbar Buttons
-        this.dom.btnPracticeKeeper?.addEventListener('click', () => {
+        document.getElementById('btn-cal-fallback-back')?.addEventListener('click', () => {
             soundEngine.playClick();
-            if (this.onPracticeKeeperToggle) {
-                const isEnabled = this.onPracticeKeeperToggle();
-                this.dom.btnPracticeKeeper.innerText = isEnabled ? 'KEEPER: ON' : 'KEEPER: OFF';
-            }
+            if (this.onCalBackClicked) this.onCalBackClicked();
         });
 
-        this.dom.btnPracticeDiff?.addEventListener('click', () => {
+        // Top Navigation buttons
+        this.dom.btnPause?.addEventListener('click', () => {
             soundEngine.playClick();
-            const current = settingsManager.get('keeperDifficulty');
-            const next = current === 'easy' ? 'medium' : (current === 'medium' ? 'hard' : 'easy');
-            settingsManager.set('keeperDifficulty', next);
-            this.dom.btnPracticeDiff.innerText = `DIFF: ${next.toUpperCase().slice(0, 4)}`;
+            this.togglePauseModal();
         });
 
-        this.dom.btnPracticeReset?.addEventListener('click', () => {
-            soundEngine.playClick();
-            if (this.onPracticeReset) this.onPracticeReset();
-        });
-
-        this.dom.btnPracticeExit?.addEventListener('click', () => {
-            soundEngine.playClick();
-            this.showScreen('mainMenu');
-            if (this.onMainMenuClicked) this.onMainMenuClicked();
-        });
-
-        // Audio Button
         this.dom.audioToggleBtn?.addEventListener('click', () => {
             soundEngine.toggleMute();
             this.updateAudioButtonState();
         });
 
-        // PiP Cam Toggle Button
-        this.dom.pipToggleBtn?.addEventListener('click', () => {
+        // Pause Modal Actions
+        document.getElementById('btn-pause-resume')?.addEventListener('click', () => {
             soundEngine.playClick();
-            const isCollapsed = this.dom.pipContainer?.classList.toggle('collapsed');
-            this.dom.pipToggleBtn.innerText = isCollapsed ? 'CAM: OFF' : 'CAM: ON';
+            if (this.onResumeClicked) this.onResumeClicked();
         });
 
-        // Game Over Buttons
+        document.getElementById('btn-pause-restart')?.addEventListener('click', () => {
+            soundEngine.playClick();
+            this.hideModal('pauseModal');
+            if (this.onRestartClicked) this.onRestartClicked();
+        });
+
+        document.getElementById('btn-pause-recalibrate')?.addEventListener('click', () => {
+            soundEngine.playClick();
+            this.hideModal('pauseModal');
+            if (this.onRecalibrateClicked) this.onRecalibrateClicked();
+        });
+
+        document.getElementById('btn-pause-settings')?.addEventListener('click', () => {
+            soundEngine.playClick();
+            this.showModal('settings');
+        });
+
+        document.getElementById('btn-pause-howto')?.addEventListener('click', () => {
+            soundEngine.playClick();
+            this.showScreen('howToPlay');
+        });
+
+        document.getElementById('btn-pause-menu')?.addEventListener('click', () => {
+            soundEngine.playClick();
+            this.hideModal('pauseModal');
+            if (this.onMainMenuClicked) this.onMainMenuClicked();
+            this.showScreen('mainMenu');
+        });
+
+        // Game Over modal actions
         document.getElementById('btn-game-over-again')?.addEventListener('click', () => {
             soundEngine.playClick();
             this.hideModal('gameOverModal');
@@ -358,95 +330,88 @@ export class UIManager {
         document.getElementById('btn-game-over-menu')?.addEventListener('click', () => {
             soundEngine.playClick();
             this.hideModal('gameOverModal');
-            this.showScreen('mainMenu');
             if (this.onMainMenuClicked) this.onMainMenuClicked();
+            this.showScreen('mainMenu');
         });
 
-        // Stats Modal buttons
-        document.getElementById('btn-close-stats')?.addEventListener('click', () => {
+        // Practice Mode Toolbar
+        this.dom.btnPracticeKeeper?.addEventListener('click', () => {
             soundEngine.playClick();
-            this.hideModal('statsModal');
-        });
-        document.getElementById('btn-done-stats')?.addEventListener('click', () => {
-            soundEngine.playClick();
-            this.hideModal('statsModal');
-        });
-        document.getElementById('btn-reset-stats')?.addEventListener('click', () => {
-            soundEngine.playClick();
-            if (confirm('Clear all your career statistics and records?')) {
-                settingsManager.resetStats();
-                this.renderStatsGrid();
+            if (this.onPracticeKeeperToggle) {
+                const active = this.onPracticeKeeperToggle();
+                this.dom.btnPracticeKeeper.innerText = active ? 'KEEPER: ON' : 'KEEPER: OFF';
+                this.dom.btnPracticeKeeper.classList.toggle('active', active);
             }
         });
 
-        // Keyboard hotkeys
+        this.dom.btnPracticeReset?.addEventListener('click', () => {
+            soundEngine.playClick();
+            if (this.onPracticeReset) this.onPracticeReset();
+        });
+
+        this.dom.btnPracticeExit?.addEventListener('click', () => {
+            soundEngine.playClick();
+            if (this.onMainMenuClicked) this.onMainMenuClicked();
+            this.showScreen('mainMenu');
+        });
+
+        // PiP camera toggle
+        this.dom.pipToggleBtn?.addEventListener('click', () => {
+            soundEngine.playClick();
+            const curr = settingsManager.get('cameraPreview');
+            settingsManager.set('cameraPreview', !curr);
+            this.toggleCameraPreview(!curr);
+        });
+
+        // Dev Debug Overlay toggle with ` backtick
         window.addEventListener('keydown', (e) => {
-            if (e.key === '`' || e.key === '~') {
+            if (e.code === 'Backquote' || e.key === '`') {
                 this.toggleDebugOverlay();
             }
         });
     }
 
     initMatchLengthUI() {
-        const presets = document.querySelectorAll('.time-presets-grid .btn-preset');
+        const presets = document.querySelectorAll('.btn-preset');
         const slider = document.getElementById('custom-time-slider');
-        const durationVal = document.getElementById('match-duration-val');
+        const durVal = document.getElementById('match-duration-val');
         const summaryPill = document.getElementById('match-summary-pill');
-
-        const formatTime = (sec) => {
-            const m = Math.floor(sec / 60);
-            const s = sec % 60;
-            return `${m}:${s < 10 ? '0' : ''}${s}`;
-        };
 
         const updateDisplay = (sec) => {
             this.selectedMatchSec = sec;
-            if (durationVal) durationVal.innerText = formatTime(sec);
+            const m = Math.floor(sec / 60);
+            const s = sec % 60;
+            const timeStr = `${m}:${s < 10 ? '0' : ''}${s}`;
+            if (durVal) durVal.innerText = timeStr;
             if (summaryPill) {
-                const modeName = this.pendingGameMode === '2player' ? '2 PLAYER MATCH' : 'SOLO MATCH';
-                summaryPill.innerText = `${modeName} — ${formatTime(sec)}${this.pendingGameMode === '2player' ? ' PER PLAYER' : ''}`;
+                summaryPill.innerText = `${this.pendingGameMode === '2player' ? '2-PLAYER MATCH' : 'SOLO MATCH'} — ${timeStr}`;
             }
-            if (slider) slider.value = sec;
-
-            presets.forEach(btn => {
-                if (parseInt(btn.dataset.sec, 10) === sec) btn.classList.add('active');
-                else btn.classList.remove('active');
-            });
         };
 
         presets.forEach(btn => {
             btn.addEventListener('click', () => {
                 soundEngine.playClick();
+                presets.forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
                 const sec = parseInt(btn.dataset.sec, 10);
+                if (slider) slider.value = sec;
                 updateDisplay(sec);
             });
         });
 
         slider?.addEventListener('input', (e) => {
             const sec = parseInt(e.target.value, 10);
+            presets.forEach(b => {
+                if (parseInt(b.dataset.sec, 10) === sec) b.classList.add('active');
+                else b.classList.remove('active');
+            });
             updateDisplay(sec);
-        });
-
-        document.getElementById('btn-start-match')?.addEventListener('click', () => {
-            soundEngine.playClick();
-            if (this.onMatchLengthConfirmed) {
-                this.onMatchLengthConfirmed(this.selectedMatchSec);
-            }
-            if (this.onGameModeSelected) {
-                this.onGameModeSelected(this.pendingGameMode);
-            }
-        });
-
-        document.getElementById('btn-back-match-length')?.addEventListener('click', () => {
-            soundEngine.playClick();
-            this.showScreen('gameModeSelect');
         });
 
         updateDisplay(this.selectedMatchSec);
     }
 
     showMatchLengthScreen(gameMode) {
-        this.pendingGameMode = gameMode;
         const sub = document.getElementById('match-length-sub');
         if (sub) {
             sub.innerText = gameMode === '2player'
@@ -489,47 +454,14 @@ export class UIManager {
             </div>
             <div class="stat-tile">
                 <div class="stat-tile-val">${stats.perfectGoals}</div>
-                <div class="stat-tile-label">Top Corner Finish</div>
+                <div class="stat-tile-label">Top Corner Finishes</div>
             </div>
         `;
-    }
-
-    showConfirmModal({ title, message, confirmText = 'CONFIRM', onConfirm }) {
-        const titleEl = document.getElementById('confirm-title');
-        const descEl = document.getElementById('confirm-desc');
-        const btnYes = document.getElementById('btn-confirm-yes');
-        const btnNo = document.getElementById('btn-confirm-no');
-
-        if (titleEl) titleEl.innerText = title;
-        if (descEl) descEl.innerText = message;
-        if (btnYes) btnYes.innerText = confirmText;
-
-        const handleConfirm = () => {
-            cleanup();
-            this.hideModal('confirmModal');
-            if (onConfirm) onConfirm();
-        };
-
-        const handleCancel = () => {
-            cleanup();
-            this.hideModal('confirmModal');
-        };
-
-        const cleanup = () => {
-            btnYes?.removeEventListener('click', handleConfirm);
-            btnNo?.removeEventListener('click', handleCancel);
-        };
-
-        btnYes?.addEventListener('click', handleConfirm);
-        btnNo?.addEventListener('click', handleCancel);
-
-        this.showModal('confirmModal');
     }
 
     initSettingsUI() {
         const s = settingsManager.getAll();
 
-        // 1. Sliders
         const sensSlider = document.getElementById('setting-sensitivity');
         const sensVal = document.getElementById('setting-sensitivity-val');
         if (sensSlider && sensVal) {
@@ -554,18 +486,6 @@ export class UIManager {
             });
         }
 
-        const shotPowerSlider = document.getElementById('setting-shotpower');
-        const shotPowerVal = document.getElementById('setting-shotpower-val');
-        if (shotPowerSlider && shotPowerVal) {
-            shotPowerSlider.value = s.shotPower;
-            shotPowerVal.innerText = `${Math.round(s.shotPower * 100)}%`;
-            shotPowerSlider.addEventListener('input', (e) => {
-                const val = parseFloat(e.target.value);
-                shotPowerVal.innerText = `${Math.round(val * 100)}%`;
-                settingsManager.set('shotPower', val);
-            });
-        }
-
         const volumeSlider = document.getElementById('setting-volume');
         const volumeVal = document.getElementById('setting-volume-val');
         if (volumeSlider && volumeVal) {
@@ -578,7 +498,6 @@ export class UIManager {
             });
         }
 
-        // 2. Toggles
         const soundToggle = document.getElementById('setting-sound-toggle');
         if (soundToggle) {
             soundToggle.checked = s.soundEffects;
@@ -597,7 +516,6 @@ export class UIManager {
             });
         }
 
-        // 3. Segmented Controls Helper
         const setupSegmented = (containerId, settingKey) => {
             const container = document.getElementById(containerId);
             if (!container) return;
@@ -622,7 +540,33 @@ export class UIManager {
         setupSegmented('seg-aimassist', 'aimAssist');
         setupSegmented('seg-difficulty', 'keeperDifficulty');
 
-        // 4. Modal action buttons
+        // Theme Appearance Control (AUTO / DAY / NIGHT)
+        const themeDesc = document.getElementById('setting-theme-desc');
+        const updateThemeLabel = () => {
+            if (themeDesc && settingsManager.getThemeLabel) {
+                themeDesc.innerText = settingsManager.getThemeLabel();
+            }
+        };
+        updateThemeLabel();
+
+        const themeContainer = document.getElementById('seg-theme');
+        if (themeContainer) {
+            const themeBtns = themeContainer.querySelectorAll('.seg-btn');
+            const curTheme = settingsManager.get('theme') || 'auto';
+            themeBtns.forEach(b => {
+                if (b.dataset.val === curTheme) b.classList.add('active');
+                else b.classList.remove('active');
+
+                b.addEventListener('click', () => {
+                    soundEngine.playClick();
+                    themeBtns.forEach(btn => btn.classList.remove('active'));
+                    b.classList.add('active');
+                    settingsManager.set('theme', b.dataset.val);
+                    updateThemeLabel();
+                });
+            });
+        }
+
         document.getElementById('btn-close-settings')?.addEventListener('click', () => {
             soundEngine.playClick();
             this.hideModal('settings');
@@ -661,9 +605,6 @@ export class UIManager {
             if (!visible) this.dom.pipContainer.classList.add('collapsed');
             else this.dom.pipContainer.classList.remove('collapsed');
         }
-        if (this.dom.pipToggleBtn) {
-            this.dom.pipToggleBtn.innerText = visible ? 'CAM: ON' : 'CAM: OFF';
-        }
     }
 
     showScreen(screenKey) {
@@ -689,7 +630,6 @@ export class UIManager {
             requestAnimationFrame(() => target.classList.add('active'));
         }
 
-        // Show Pause button & PiP during gameplay only
         if (screenKey === 'gameplayHUD') {
             if (this.dom.pipContainer) this.dom.pipContainer.style.display = 'block';
             if (this.dom.btnPause) this.dom.btnPause.style.display = 'flex';
@@ -750,6 +690,9 @@ export class UIManager {
         }
     }
 
+    // ============================================================
+    // PLAYER ENROLLMENT & CALIBRATION UX (Phase 2 & 5)
+    // ============================================================
     showCalibrationScreen(playerNum = 1, trackingMode = 'head', inputManager = null) {
         const cal = this.dom.calibrationOverlay;
         if (!cal) return;
@@ -757,14 +700,9 @@ export class UIManager {
         const title = document.getElementById('cal-title');
         const desc = document.getElementById('cal-desc');
 
-        if (title) title.innerText = `SET UP YOUR CAMERA — PLAYER ${playerNum}`;
-        if (desc) {
-            desc.innerText = trackingMode === 'head'
-                ? 'Position your face inside the guide.'
-                : 'Position your full body inside the guide.';
-        }
+        if (title) title.innerText = `PLAYER ${playerNum} SETUP`;
+        if (desc) desc.innerText = "Let's lock onto you.";
 
-        // Show proper framing guide
         if (this.dom.faceGuideFrame) {
             this.dom.faceGuideFrame.style.display = trackingMode === 'head' ? 'flex' : 'none';
             this.dom.faceGuideFrame.className = 'face-guide-frame';
@@ -774,12 +712,10 @@ export class UIManager {
             this.dom.bodyGuideFrame.className = 'body-guide-frame';
         }
 
-        // Attach live camera stream to calibration preview
         if (inputManager && this.dom.calWebcamPreview) {
             inputManager.attachPreviewTo(this.dom.calWebcamPreview);
         }
 
-        // Reset progress bar, quality dots, and success card
         if (this.dom.calProgressFill) this.dom.calProgressFill.style.width = '0%';
         if (this.dom.calQualityDots) {
             const dots = this.dom.calQualityDots.querySelectorAll('.qdot');
@@ -787,27 +723,24 @@ export class UIManager {
         }
         if (this.dom.calSuccessCard) this.dom.calSuccessCard.style.display = 'none';
 
-        // Reset buttons: hide Start Match and Recalibrate until calibration succeeds
         if (this.dom.btnCalStartMatch) this.dom.btnCalStartMatch.style.display = 'none';
         if (this.dom.btnCalRecalibrate) this.dom.btnCalRecalibrate.style.display = 'none';
         if (this.dom.btnCalReady) this.dom.btnCalReady.style.display = 'none';
         if (this.dom.btnCalBack) this.dom.btnCalBack.style.display = 'inline-block';
 
-        // Check if camera permission error is active
         if (inputManager && !inputManager.cameraAllowed) {
             this.showCameraError(inputManager.cameraError);
         } else if (this.dom.calCameraFallback) {
             this.dom.calCameraFallback.style.display = 'none';
         }
 
-        // Initial status badge
         if (this.dom.calStatusBadge && this.dom.calStatusText) {
             this.dom.calStatusBadge.className = 'cal-status-badge';
             if (this.dom.calStatusIcon) this.dom.calStatusIcon.innerText = '○';
-            this.dom.calStatusText.innerText = trackingMode === 'head' ? 'FACE NOT DETECTED' : 'BODY NOT DETECTED';
+            this.dom.calStatusText.innerText = 'FINDING FACE...';
         }
         if (this.dom.calSubtext) {
-            this.dom.calSubtext.innerText = 'Position your head in the center guide';
+            this.dom.calSubtext.innerText = 'Center your face inside the framing guide';
         }
         if (this.dom.calStepCount) {
             this.dom.calStepCount.innerText = '';
@@ -818,123 +751,135 @@ export class UIManager {
         cal.classList.add('visible');
     }
 
+    updateStepIndicator(step) {
+        const step1 = document.getElementById('step-ind-1');
+        const step2 = document.getElementById('step-ind-2');
+        const step3 = document.getElementById('step-ind-3');
+        if (!step1 || !step2 || !step3) return;
+
+        step1.className = 'step-item';
+        step2.className = 'step-item';
+        step3.className = 'step-item';
+
+        if (step === 1) {
+            step1.classList.add('active');
+        } else if (step === 2) {
+            step1.classList.add('completed');
+            step2.classList.add('active');
+        } else if (step >= 3) {
+            step1.classList.add('completed');
+            step2.classList.add('completed');
+            step3.classList.add('active');
+        }
+    }
+
     updateCalibrationFeedback(positionStatus = 'OK', isTracking = true, progress = null, trackingMode = 'head') {
         if (!this.dom.calStatusBadge || !this.dom.calStatusText) return;
 
-        let label = 'LOOK STRAIGHT';
+        let label = 'LOOK DIRECTLY AT CAMERA';
         let icon = '🎯';
-        let badgeClass = 'cal-status-badge';
-        let guideModifier = '';
-        let hint = 'Hold still to calibrate';
+        let badgeClass = 'cal-status-badge ok';
+        let guideModifier = 'aligned';
+        let hint = 'Hold still to complete setup';
 
-        switch (positionStatus) {
-            case 'CAMERA_DENIED':
-                this.showCameraError('NotAllowedError');
-                return;
-            case 'CAMERA_UNAVAILABLE':
-                this.showCameraError('CameraUnavailable');
-                return;
-            case 'NO_FACE':
-                label = '○ FACE NOT DETECTED';
-                icon = '○';
-                badgeClass = 'cal-status-badge';
-                guideModifier = '';
-                hint = 'Position your face inside the framing guide';
-                break;
-            case 'NO_BODY':
-                label = '○ BODY NOT DETECTED';
-                icon = '○';
-                badgeClass = 'cal-status-badge';
-                guideModifier = '';
-                hint = 'Step back until your body is inside the framing guide';
-                break;
-            case 'MOVE_CLOSER':
-                label = 'MOVE CLOSER';
-                icon = '🔍';
-                badgeClass = 'cal-status-badge warning';
-                guideModifier = 'tracking';
-                hint = 'Come slightly closer to the camera';
-                break;
-            case 'MOVE_BACK':
-                label = 'MOVE BACK';
-                icon = '↔️';
-                badgeClass = 'cal-status-badge warning';
-                guideModifier = 'tracking';
-                hint = 'Step or lean slightly back from the camera';
-                break;
-            case 'MOVE_RIGHT':
-                label = 'MOVE RIGHT';
-                icon = '👉';
-                badgeClass = 'cal-status-badge warning';
-                guideModifier = 'tracking';
-                hint = 'Move slightly to your right to center yourself';
-                break;
-            case 'MOVE_LEFT':
-                label = 'MOVE LEFT';
-                icon = '👈';
-                badgeClass = 'cal-status-badge warning';
-                guideModifier = 'tracking';
-                hint = 'Move slightly to your left to center yourself';
-                break;
-            case 'MOVE_DOWN':
-                label = 'MOVE DOWN';
-                icon = '👇';
-                badgeClass = 'cal-status-badge warning';
-                guideModifier = 'tracking';
-                hint = 'Lower your position or tilt camera up';
-                break;
-            case 'MOVE_UP':
-                label = 'MOVE UP';
-                icon = '☝️';
-                badgeClass = 'cal-status-badge warning';
-                guideModifier = 'tracking';
-                hint = 'Raise your position or tilt camera down';
-                break;
-            case 'FACE_DETECTED':
-                label = '✓ FACE DETECTED';
-                icon = '✓';
-                badgeClass = 'cal-status-badge ok';
-                guideModifier = 'aligned';
-                hint = 'LOOK STRAIGHT — Keep your head still';
-                break;
-            case 'LOOK_STRAIGHT':
-                label = 'LOOK STRAIGHT — HOLD STILL';
-                icon = '✓';
-                badgeClass = 'cal-status-badge ok';
-                guideModifier = 'aligned calibrating';
-                hint = 'Calibrating neutral position...';
-                break;
-            case 'BODY_DETECTED':
-                label = '✓ BODY DETECTED';
-                icon = '✓';
-                badgeClass = 'cal-status-badge ok';
-                guideModifier = 'aligned calibrating';
-                hint = 'STAND STRAIGHT — Ready to calibrate';
-                break;
-            case 'OK':
-            default:
-                label = isTracking ? '✓ FACE DETECTED' : 'LOOK STRAIGHT';
-                icon = '✓';
-                badgeClass = 'cal-status-badge ok';
-                guideModifier = isTracking ? 'aligned' : '';
-                hint = 'Keep your head still';
-                break;
+        const stage = progress ? progress.stage : 'WAITING';
+
+        if (stage === 'ERROR') {
+            label = progress.stageLabel || 'CAMERA ERROR';
+            hint = 'Camera access is required for tracking.';
+            icon = '✕';
+            badgeClass = 'cal-status-badge error';
+            guideModifier = '';
+            this.updateStepIndicator(0);
+            if (this.dom.calSuccessCard) this.dom.calSuccessCard.style.display = 'none';
+            if (this.dom.btnCalStartMatch) this.dom.btnCalStartMatch.style.display = 'none';
+        } else if (stage === 'IDENTITY') {
+            label = 'IDENTITY CAPTURE';
+            hint = progress.samples !== undefined
+                ? `GOOD SAMPLES: ${progress.samples} / ${progress.required || 24}`
+                : 'Look directly at the camera. Capturing biometric profile...';
+            icon = '⚡';
+            badgeClass = 'cal-status-badge tracking';
+            guideModifier = 'tracking';
+            this.updateStepIndicator(1);
+        } else if (stage === 'HEAD_POSE' || stage === 'CALIBRATING') {
+            label = trackingMode === 'head' ? 'HEAD CONTROL CALIBRATION' : 'BODY STANCE CALIBRATION';
+            hint = progress.samples !== undefined
+                ? `NEUTRAL SAMPLES: ${progress.samples} / ${progress.required || 24}`
+                : 'Sit naturally. Look straight ahead. Hold still.';
+            icon = '🎯';
+            badgeClass = 'cal-status-badge ok';
+            guideModifier = 'aligned calibrating';
+            this.updateStepIndicator(2);
+        } else if (stage === 'LOCKED') {
+            label = 'PLAYER LOCKED ✓';
+            hint = 'Neutral posture saved. Other faces will be ignored.';
+            icon = '✓';
+            badgeClass = 'cal-status-badge success';
+            guideModifier = 'complete';
+            this.updateStepIndicator(3);
+        } else {
+            this.updateStepIndicator(1);
+            // Pre-enrollment positioning feedback
+            switch (positionStatus) {
+                case 'MOVE_CLOSER':
+                    label = 'MOVE CLOSER';
+                    icon = '🔍';
+                    badgeClass = 'cal-status-badge warning';
+                    guideModifier = 'tracking';
+                    hint = 'Move slightly closer to the camera';
+                    break;
+                case 'MOVE_BACK':
+                    label = 'MOVE BACK';
+                    icon = '↔️';
+                    badgeClass = 'cal-status-badge warning';
+                    guideModifier = 'tracking';
+                    hint = 'Lean or step slightly back';
+                    break;
+                case 'MOVE_RIGHT':
+                    label = 'MOVE RIGHT';
+                    icon = '👉';
+                    badgeClass = 'cal-status-badge warning';
+                    guideModifier = 'tracking';
+                    hint = 'Center yourself in the guide';
+                    break;
+                case 'MOVE_LEFT':
+                    label = 'MOVE LEFT';
+                    icon = '👈';
+                    badgeClass = 'cal-status-badge warning';
+                    guideModifier = 'tracking';
+                    hint = 'Center yourself in the guide';
+                    break;
+                case 'FULL_BODY_REQUIRED':
+                    label = 'FULL BODY REQUIRED';
+                    icon = '↔️';
+                    badgeClass = 'cal-status-badge warning';
+                    guideModifier = 'tracking';
+                    hint = 'Step back so full body is visible';
+                    break;
+                case 'NO_BODY':
+                case 'NO_FACE':
+                default:
+                    label = trackingMode === 'head' ? 'FINDING FACE...' : 'FINDING BODY...';
+                    icon = '○';
+                    badgeClass = 'cal-status-badge';
+                    guideModifier = '';
+                    hint = 'Position yourself in the guide to begin';
+                    break;
+            }
         }
 
         this.dom.calStatusText.innerText = label;
         if (this.dom.calStatusIcon) this.dom.calStatusIcon.innerText = icon;
         this.dom.calStatusBadge.className = badgeClass;
-
         if (this.dom.calSubtext) this.dom.calSubtext.innerText = hint;
 
-        // Update framing guide styling
         const activeGuide = trackingMode === 'head' ? this.dom.faceGuideFrame : this.dom.bodyGuideFrame;
         if (activeGuide) {
             const baseClass = trackingMode === 'head' ? 'face-guide-frame' : 'body-guide-frame';
             activeGuide.className = guideModifier ? `${baseClass} ${guideModifier}` : baseClass;
         }
 
-        // Animate calibration progress bar & quality dots
         if (progress) {
             const pct = progress.percent || 0;
             if (this.dom.calProgressFill) {
@@ -942,11 +887,10 @@ export class UIManager {
             }
 
             if (this.dom.calStepCount) {
-                if (pct > 0 && pct < 100) {
-                    const stepNum = pct < 35 ? '3' : pct < 70 ? '2' : '1';
-                    this.dom.calStepCount.innerText = stepNum;
-                } else if (pct >= 100) {
-                    this.dom.calStepCount.innerText = 'CALIBRATED';
+                if (progress.samples !== undefined && progress.required) {
+                    this.dom.calStepCount.innerText = `${progress.samples} / ${progress.required}`;
+                } else if (pct > 0) {
+                    this.dom.calStepCount.innerText = `${pct}%`;
                 } else {
                     this.dom.calStepCount.innerText = '';
                 }
@@ -955,64 +899,44 @@ export class UIManager {
             if (this.dom.calQualityDots) {
                 const dots = this.dom.calQualityDots.querySelectorAll('.qdot');
                 dots.forEach((dot, idx) => {
-                    if (idx < progress.quality) {
-                        dot.classList.add('filled');
-                    } else {
-                        dot.classList.remove('filled');
-                    }
+                    if (idx < progress.quality) dot.classList.add('filled');
+                    else dot.classList.remove('filled');
                 });
             }
         }
     }
 
     showCalibrationSuccess() {
+        this.updateStepIndicator(3);
+
         if (this.dom.calStatusBadge && this.dom.calStatusText) {
             this.dom.calStatusBadge.className = 'cal-status-badge success';
             if (this.dom.calStatusIcon) this.dom.calStatusIcon.innerText = '✓';
-            this.dom.calStatusText.innerText = 'CALIBRATED ✓';
+            this.dom.calStatusText.innerText = 'PLAYER LOCKED ✓';
         }
 
-        if (this.dom.faceGuideFrame) {
-            this.dom.faceGuideFrame.className = 'face-guide-frame complete';
-        }
-        if (this.dom.bodyGuideFrame) {
-            this.dom.bodyGuideFrame.className = 'body-guide-frame complete';
-        }
+        if (this.dom.faceGuideFrame) this.dom.faceGuideFrame.className = 'face-guide-frame complete';
+        if (this.dom.bodyGuideFrame) this.dom.bodyGuideFrame.className = 'body-guide-frame complete';
 
-        if (this.dom.calProgressFill) {
-            this.dom.calProgressFill.style.width = '100%';
-        }
-        if (this.dom.calStepCount) {
-            this.dom.calStepCount.innerText = 'SAVED ✓';
-        }
-        if (this.dom.calSubtext) {
-            this.dom.calSubtext.innerText = 'Neutral position established successfully.';
-        }
+        if (this.dom.calProgressFill) this.dom.calProgressFill.style.width = '100%';
+        if (this.dom.calStepCount) this.dom.calStepCount.innerText = '24 / 24';
+        if (this.dom.calSubtext) this.dom.calSubtext.innerText = 'Neutral position saved. Other faces will be ignored.';
 
-        if (this.dom.calQualityDots) {
-            const dots = this.dom.calQualityDots.querySelectorAll('.qdot');
-            dots.forEach(d => d.classList.add('filled'));
-        }
-
-        // Show confirmation success card
         if (this.dom.calSuccessCard) {
+            const title = this.dom.calSuccessCard.querySelector('.cal-success-title');
+            const desc = this.dom.calSuccessCard.querySelector('.cal-success-desc');
+            if (title) title.innerText = 'PLAYER 1 RECOGNIZED ✓';
+            if (desc) desc.innerText = 'Your natural posture is calibrated. Other faces will be ignored.';
             this.dom.calSuccessCard.style.display = 'flex';
         }
 
-        // Explicit user confirmation: display YES, START MATCH and RECALIBRATE buttons
         if (this.dom.btnCalStartMatch) {
             this.dom.btnCalStartMatch.style.display = 'inline-block';
             this.dom.btnCalStartMatch.focus();
         }
-        if (this.dom.btnCalRecalibrate) {
-            this.dom.btnCalRecalibrate.style.display = 'inline-block';
-        }
-        if (this.dom.btnCalReady) {
-            this.dom.btnCalReady.style.display = 'none';
-        }
-        if (this.dom.btnCalBack) {
-            this.dom.btnCalBack.style.display = 'inline-block';
-        }
+        if (this.dom.btnCalRecalibrate) this.dom.btnCalRecalibrate.style.display = 'inline-block';
+        if (this.dom.btnCalReady) this.dom.btnCalReady.style.display = 'none';
+        if (this.dom.btnCalBack) this.dom.btnCalBack.style.display = 'inline-block';
     }
 
     showCameraError(errorType) {
@@ -1022,14 +946,29 @@ export class UIManager {
         const desc = this.dom.calFallbackDesc || document.getElementById('cal-fallback-desc');
 
         if (errorType === 'NotAllowedError') {
-            if (title) title.innerText = 'CAMERA ACCESS NEEDED';
-            if (desc) desc.innerText = 'We need your camera to track your movement. Please allow camera permissions in your browser.';
+            if (title) title.innerText = 'CAMERA ACCESS REQUIRED';
+            if (desc) desc.innerText = 'Allow camera access to continue.';
         } else {
             if (title) title.innerText = 'CAMERA UNAVAILABLE';
-            if (desc) desc.innerText = 'Unable to connect to a camera stream. You can retry or switch to keyboard controls.';
+            if (desc) desc.innerText = 'No camera device detected. Allow camera access or use keyboard.';
         }
 
         this.dom.calCameraFallback.style.display = 'flex';
+
+        // STRICT P0 FIX: NEVER show success or 100% when camera is unavailable
+        if (this.dom.calSuccessCard) this.dom.calSuccessCard.style.display = 'none';
+        if (this.dom.btnCalStartMatch) this.dom.btnCalStartMatch.style.display = 'none';
+        if (this.dom.calProgressFill) this.dom.calProgressFill.style.width = '0%';
+        if (this.dom.calStepCount) this.dom.calStepCount.innerText = '';
+        if (this.dom.calStatusBadge && this.dom.calStatusText) {
+            this.dom.calStatusBadge.className = 'cal-status-badge error';
+            if (this.dom.calStatusIcon) this.dom.calStatusIcon.innerText = '✕';
+            this.dom.calStatusText.innerText = 'CAMERA UNAVAILABLE';
+        }
+        if (this.dom.calSubtext) {
+            this.dom.calSubtext.innerText = 'Camera access is required for tracking.';
+        }
+        this.updateStepIndicator(0);
     }
 
     hideCameraError() {
@@ -1068,6 +1007,9 @@ export class UIManager {
         }
     }
 
+    // ============================================================
+    // MATCH HUD UPDATES
+    // ============================================================
     updateSoloHUD(score, timeSec, bestScore) {
         if (this.dom.soloStats) this.dom.soloStats.style.display = 'flex';
         if (this.dom.twoPlayerStats) this.dom.twoPlayerStats.style.display = 'none';
@@ -1119,8 +1061,16 @@ export class UIManager {
 
             this.dom.aimReticle.style.transform = `translate3d(${targetX}px, -50%, 0)`;
 
-            // Subtle scale when power is armed
-            if (power > 0.7) {
+            // Zone label
+            if (this.dom.reticleLabel) {
+                if (Math.abs(aimNormalized) < 0.18) this.dom.reticleLabel.innerText = 'CENTER';
+                else if (aimNormalized < -0.7) this.dom.reticleLabel.innerText = 'LEFT CORNER';
+                else if (aimNormalized > 0.7) this.dom.reticleLabel.innerText = 'RIGHT CORNER';
+                else if (aimNormalized < 0) this.dom.reticleLabel.innerText = 'MID LEFT';
+                else this.dom.reticleLabel.innerText = 'MID RIGHT';
+            }
+
+            if (power > 0.72) {
                 this.dom.aimReticle.classList.add('armed');
             } else {
                 this.dom.aimReticle.classList.remove('armed');
@@ -1137,16 +1087,21 @@ export class UIManager {
         const pct = Math.round(powerNormalized * 100);
         if (this.dom.powerFill) {
             this.dom.powerFill.style.width = `${pct}%`;
-            if (pct >= 85) {
-                this.dom.powerFill.style.backgroundColor = '#ff3b30'; // Red high alert
-            } else if (pct >= 50) {
-                this.dom.powerFill.style.backgroundColor = '#ffd700'; // Gold
+            // 4-Tier power styling
+            if (pct >= 88) {
+                this.dom.powerFill.style.backgroundColor = '#ff3b30'; // MAX FIRE
+            } else if (pct >= 65) {
+                this.dom.powerFill.style.backgroundColor = '#ff9500'; // HIGH
+            } else if (pct >= 32) {
+                this.dom.powerFill.style.backgroundColor = '#ffd700'; // MEDIUM
             } else {
-                this.dom.powerFill.style.backgroundColor = '#00e676'; // Pitch Green
+                this.dom.powerFill.style.backgroundColor = '#00e676'; // LOW
             }
         }
         if (this.dom.powerPct) {
-            this.dom.powerPct.innerText = `${pct}%`;
+            let label = `${pct}%`;
+            if (pct >= 90) label += ' (MAX)';
+            this.dom.powerPct.innerText = label;
         }
     }
 
@@ -1217,6 +1172,9 @@ export class UIManager {
         this.showModal('playerSwitchModal');
     }
 
+    // ============================================================
+    // MATCH RESULT SCREEN (Phase 27 & 28)
+    // ============================================================
     showSoloGameOver(stats) {
         const modal = this.dom.gameOverModal;
         if (!modal) return;
@@ -1233,12 +1191,12 @@ export class UIManager {
         if (title) title.innerText = 'FULL TIME';
         if (sub) {
             sub.style.display = 'block';
-            sub.innerText = `YOUR SCORE: ${stats.score}`;
+            sub.innerText = `FINAL SCORE: ${stats.score} PTS`;
         }
 
         if (details) {
             details.innerHTML = `
-                <div class="stat-row"><span>HIGH SCORE</span><strong>${stats.bestScore}</strong></div>
+                <div class="stat-row highlight"><span>HIGH SCORE</span><strong>${stats.bestScore}</strong></div>
                 <div class="stat-row"><span>GOALS</span><strong>${stats.goals}</strong></div>
                 <div class="stat-row"><span>SHOTS TAKEN</span><strong>${stats.shotsTaken}</strong></div>
                 <div class="stat-row"><span>ACCURACY</span><strong>${stats.accuracy}%</strong></div>
@@ -1299,29 +1257,43 @@ export class UIManager {
         this.showModal('gameOverModal');
     }
 
+    // Dynamic Share using current window.location.href (Phase 28)
     shareMatchResult() {
         const btn = document.getElementById('btn-game-over-share');
-        let text = '⚽ TILT KICK — FULL TIME\n';
+        const currentUrl = window.location.href;
+
+        let shareText = '⚽ TILT KICK — FULL TIME RESULT\n';
         if (this.lastMatchShareData) {
             if (this.lastMatchShareData.mode === '2player') {
-                text += `PLAYER 1\n${this.lastMatchShareData.player1Score}\n\n`;
-                text += `PLAYER 2\n${this.lastMatchShareData.player2Score}\n\n`;
-                text += `${this.lastMatchShareData.winner}\n`;
+                shareText += `PLAYER 1: ${this.lastMatchShareData.player1Score} pts | PLAYER 2: ${this.lastMatchShareData.player2Score} pts\n`;
+                shareText += `Result: ${this.lastMatchShareData.winner}!\n`;
             } else {
-                text += `FINAL SCORE: ${this.lastMatchShareData.score} pts\n`;
-                text += `GOALS: ${this.lastMatchShareData.goals} • ACCURACY: ${this.lastMatchShareData.accuracy}%\n`;
+                shareText += `Score: ${this.lastMatchShareData.score} pts | Goals: ${this.lastMatchShareData.goals} | Accuracy: ${this.lastMatchShareData.accuracy}%\n`;
             }
         }
-        text += 'Play TILT KICK in your browser!';
+        shareText += `Play the head-controlled football challenge here:\n${currentUrl}`;
 
+        // Prefer Web Share API
+        if (navigator.share) {
+            navigator.share({
+                title: 'TILT KICK — Head. Tilt. Kick.',
+                text: shareText,
+                url: currentUrl
+            }).catch(() => {
+                this.fallbackCopyToClipboard(shareText, btn);
+            });
+        } else {
+            this.fallbackCopyToClipboard(shareText, btn);
+        }
+    }
+
+    fallbackCopyToClipboard(text, btn) {
         if (navigator.clipboard && navigator.clipboard.writeText) {
             navigator.clipboard.writeText(text).then(() => {
                 if (btn) {
                     const prev = btn.innerText;
-                    btn.innerText = 'COPIED! ✓';
-                    setTimeout(() => {
-                        btn.innerText = prev;
-                    }, 2000);
+                    btn.innerText = 'RESULT COPIED ✓';
+                    setTimeout(() => { btn.innerText = prev; }, 2200);
                 }
             }).catch(() => {
                 window.prompt('Copy match result to share:', text);
@@ -1331,18 +1303,20 @@ export class UIManager {
         }
     }
 
+    // Camera Window Badge (Phase 24)
     updateTrackingBadge(statusText, isTracking, isCameraActive = false) {
         if (!this.dom.pipStatusBadge) return;
         this.dom.pipStatusBadge.innerText = statusText;
+
         if (!isCameraActive) {
             this.dom.pipStatusBadge.className = 'pip-badge off';
-            if (this.dom.pipToggleBtn) this.dom.pipToggleBtn.innerText = 'CAM: OFF';
+            if (this.dom.pipToggleBtn) this.dom.pipToggleBtn.innerText = 'CAM OFF';
         } else if (isTracking) {
             this.dom.pipStatusBadge.className = 'pip-badge tracking';
-            if (this.dom.pipToggleBtn) this.dom.pipToggleBtn.innerText = 'CAM: ON';
+            if (this.dom.pipToggleBtn) this.dom.pipToggleBtn.innerText = 'CAM ACTIVE';
         } else {
             this.dom.pipStatusBadge.className = 'pip-badge searching';
-            if (this.dom.pipToggleBtn) this.dom.pipToggleBtn.innerText = 'CAM: ON';
+            if (this.dom.pipToggleBtn) this.dom.pipToggleBtn.innerText = 'SEARCHING';
         }
     }
 
@@ -1353,14 +1327,36 @@ export class UIManager {
         overlay.style.display = isHidden ? 'block' : 'none';
     }
 
+    // Complete Developer Telemetry Overlay (Phase 37)
     updateDebugStats(stats) {
         if (!this.dom.debugOverlay || this.dom.debugOverlay.style.display === 'none') return;
-        document.getElementById('dbg-status').innerText = stats.status;
-        document.getElementById('dbg-raw').innerText = `${stats.rawAngle}°`;
-        document.getElementById('dbg-smoothed').innerText = `${stats.smoothedAngle}°`;
-        document.getElementById('dbg-neutral').innerText = `${stats.neutralAngle}°`;
-        document.getElementById('dbg-deadzone').innerText = `${stats.deadZone}°`;
-        document.getElementById('dbg-aim').innerText = stats.aim;
-        document.getElementById('dbg-power').innerText = `${stats.power}%`;
+
+        // FPS calculation
+        this.frameCount++;
+        const now = performance.now();
+        if (now - this.lastFpsUpdate >= 500) {
+            this.currentFps = Math.round((this.frameCount * 1000) / (now - this.lastFpsUpdate));
+            this.frameCount = 0;
+            this.lastFpsUpdate = now;
+        }
+
+        const setField = (id, val) => {
+            const el = document.getElementById(id);
+            if (el) el.innerText = val;
+        };
+
+        setField('dbg-player-id', stats.playerId || 'PLAYER 1');
+        setField('dbg-face-count', `${stats.faceCount || 1} (${stats.ignoredFaces || 0} IGNORED)`);
+        setField('dbg-match-score', stats.matchScore || '100%');
+        setField('dbg-raw', `${stats.rawRoll || 0}°`);
+        setField('dbg-smoothed', `${stats.smoothedRoll || 0}°`);
+        setField('dbg-neutral', `${stats.neutralRoll || 0}°`);
+        setField('dbg-pitch', `${stats.rawPitch || 0}`);
+        setField('dbg-pitchvel', `${stats.pitchVel || 0}`);
+        setField('dbg-aim', stats.aim || '0.00');
+        setField('dbg-locked-aim', stats.lockedAim || '0.00');
+        setField('dbg-power', `${stats.power || 0}%`);
+        setField('dbg-status', stats.status || 'OK');
+        setField('dbg-fps', `${this.currentFps} FPS`);
     }
 }

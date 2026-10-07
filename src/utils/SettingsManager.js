@@ -22,6 +22,9 @@ export const DEFAULT_SETTINGS = {
     // Camera
     cameraPreview: true,          // true / false
 
+    // Appearance Theme
+    theme: 'auto',                // 'auto', 'day', 'night'
+
     // Accessibility
     reducedMotion: false          // true / false
 };
@@ -149,11 +152,30 @@ class SettingsManager {
             s.cameraPreview = data.cameraPreview;
         }
 
+        if (['auto', 'day', 'night'].includes(data.theme)) {
+            s.theme = data.theme;
+        }
+
         if (typeof data.reducedMotion === 'boolean') {
             s.reducedMotion = data.reducedMotion;
         }
 
         return s;
+    }
+
+    getEffectiveTheme() {
+        if (this.settings.theme === 'day') return 'day';
+        if (this.settings.theme === 'night') return 'night';
+        // AUTO: check device local time (6:00 to 18:59 = Day, else Night)
+        const hour = new Date().getHours();
+        return (hour >= 6 && hour < 19) ? 'day' : 'night';
+    }
+
+    getThemeLabel() {
+        if (this.settings.theme === 'day') return 'DAY';
+        if (this.settings.theme === 'night') return 'NIGHT';
+        const eff = this.getEffectiveTheme();
+        return `AUTO • ${eff.toUpperCase()}`;
     }
 
     get(key) {
